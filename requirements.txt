@@ -1,0 +1,17 @@
+# Web framework infrastructure
+fastapi>=0.110.0
+uvicorn>=0.28.0
+
+# Sound file exporter (Bypasses NumPy entirely)
+soundfile>=0.12.1
+
+# The Text-To-Speech core stack
+kokoro>=0.9.4
+misaki[en]>=0.4.0
+
+# Legacy transformers release to allow compatibility with Intel PyTorch 2.2.2
+transformers<4.40.0
+torch==2.2.2
+
+# Packaging
+pyinstaller==6.20.0

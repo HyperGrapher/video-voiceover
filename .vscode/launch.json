@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:speechapp}",
+            "name": "Debug speechapp",
+            "target": "speechapp",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug speechapp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:speechapp}",
+            "name": "Release speechapp",
+            "target": "speechapp",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release speechapp"
+        }
+    ]
+}
