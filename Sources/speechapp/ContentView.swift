@@ -467,7 +467,7 @@ struct ContentView: View {
             }
             try player.finish()
             if !streamedPCM.isEmpty {
-                let fileURL = try savePCMAsWAV(streamedPCM)
+                let fileURL = try savePCMAsM4A(streamedPCM)
                 loadSavedRecordings()
                 statusMessage = "Streaming complete and saved \(fileURL.lastPathComponent)"
             } else {
@@ -560,7 +560,7 @@ struct ContentView: View {
             return
         }
 
-        let fileURL = try savePCMAsWAV(pcmData)
+        let fileURL = try savePCMAsM4A(pcmData)
         loadSavedRecordings()
         statusMessage = "Saved \(fileURL.lastPathComponent)"
         statusKind = .ready
@@ -583,62 +583,88 @@ struct ContentView: View {
     }
 
     private func saveGeneratedAudio(_ data: Data) throws -> URL {
-        try saveAudioData(data, fileExtension: "wav")
+        let temporaryWAV = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("wav")
+        try data.write(to: temporaryWAV, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: temporaryWAV) }
+
+        let inputFile = try AVAudioFile(forReading: temporaryWAV)
+        let outputURL = try makeRecordingURL(fileExtension: "m4a")
+        try transcodeAudioFile(inputFile, to: outputURL)
+        return outputURL
     }
 
-    private func savePCMAsWAV(_ pcmData: Data) throws -> URL {
-        try saveAudioData(wavData(fromPCM16: pcmData), fileExtension: "wav")
+    private func savePCMAsM4A(_ pcmData: Data) throws -> URL {
+        guard let inputFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 24_000,
+            channels: 1,
+            interleaved: false
+        ) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        let frameCount = pcmData.count / MemoryLayout<Int16>.size
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: inputFormat,
+            frameCapacity: AVAudioFrameCount(frameCount)
+        ) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        pcmData.withUnsafeBytes { rawBuffer in
+            let samples = rawBuffer.bindMemory(to: Int16.self)
+            let output = buffer.floatChannelData![0]
+
+            for index in 0..<frameCount {
+                output[index] = Float(samples[index]) / Float(Int16.max)
+            }
+        }
+
+        let outputURL = try makeRecordingURL(fileExtension: "m4a")
+        let outputFile = try AVAudioFile(forWriting: outputURL, settings: m4aSettings)
+        try outputFile.write(from: buffer)
+        return outputURL
     }
 
-    private func saveAudioData(_ data: Data, fileExtension: String) throws -> URL {
+    private func makeRecordingURL(fileExtension: String) throws -> URL {
         let directory = try recordingsDirectory()
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
 
         let prefix = sanitizedTitlePrefix()
         let filename = "\(formatter.string(from: Date()))_\(selectedVoice)_\(prefix).\(fileExtension)"
-        let url = directory.appendingPathComponent(filename)
-        try data.write(to: url, options: .atomic)
-        return url
+        return directory.appendingPathComponent(filename)
     }
 
-    private func wavData(fromPCM16 pcmData: Data, sampleRate: UInt32 = 24_000, channels: UInt16 = 1) -> Data {
-        var wav = Data()
-        let bitsPerSample: UInt16 = 16
-        let byteRate = sampleRate * UInt32(channels) * UInt32(bitsPerSample / 8)
-        let blockAlign = channels * (bitsPerSample / 8)
-        let dataSize = UInt32(pcmData.count)
-        let riffSize = UInt32(36) + dataSize
-
-        appendASCII("RIFF", to: &wav)
-        appendUInt32LE(riffSize, to: &wav)
-        appendASCII("WAVE", to: &wav)
-        appendASCII("fmt ", to: &wav)
-        appendUInt32LE(16, to: &wav)
-        appendUInt16LE(1, to: &wav)
-        appendUInt16LE(channels, to: &wav)
-        appendUInt32LE(sampleRate, to: &wav)
-        appendUInt32LE(byteRate, to: &wav)
-        appendUInt16LE(blockAlign, to: &wav)
-        appendUInt16LE(bitsPerSample, to: &wav)
-        appendASCII("data", to: &wav)
-        appendUInt32LE(dataSize, to: &wav)
-        wav.append(pcmData)
-        return wav
+    private var m4aSettings: [String: Any] {
+        [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 24_000,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderBitRateKey: 64_000
+        ]
     }
 
-    private func appendASCII(_ string: String, to data: inout Data) {
-        data.append(contentsOf: string.utf8)
-    }
+    private func transcodeAudioFile(_ inputFile: AVAudioFile, to outputURL: URL) throws {
+        let processingFormat = inputFile.processingFormat
+        let outputFile = try AVAudioFile(forWriting: outputURL, settings: m4aSettings)
+        let capacity = AVAudioFrameCount(min(inputFile.length, 16_384))
 
-    private func appendUInt16LE(_ value: UInt16, to data: inout Data) {
-        var littleEndian = value.littleEndian
-        withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
-    }
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: processingFormat, frameCapacity: capacity) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
 
-    private func appendUInt32LE(_ value: UInt32, to data: inout Data) {
-        var littleEndian = value.littleEndian
-        withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+        while inputFile.framePosition < inputFile.length {
+            try inputFile.read(into: buffer)
+            if buffer.frameLength == 0 {
+                break
+            }
+            try outputFile.write(from: buffer)
+            buffer.frameLength = 0
+        }
     }
 
     private func sanitizedTitlePrefix() -> String {
@@ -664,7 +690,7 @@ struct ContentView: View {
             )
 
             savedRecordings = urls
-                .filter { $0.pathExtension.lowercased() == "wav" }
+                .filter { ["m4a", "wav"].contains($0.pathExtension.lowercased()) }
                 .compactMap { url in
                     let values = try? url.resourceValues(forKeys: [.creationDateKey, .fileSizeKey])
                     return SavedRecording(

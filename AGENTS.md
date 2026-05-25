@@ -27,7 +27,8 @@ The intended streaming protocol is raw little-endian 16-bit mono PCM at 24 kHz (
 - Added this `AGENTS.md` file with app context, workflow constraints, and change logging expectations.
 - Added a non-streaming `/tts-file` backend endpoint that returns a complete WAV file for save-to-disk workflows.
 - Reworked the SwiftUI app into a two-pane macOS interface with a composer area and saved-audio library.
-- Added saved WAV file management under Application Support, including refresh, play/pause, and delete actions.
+- Added saved audio file management under Application Support, including refresh, play/pause, and delete actions.
 - Added streaming cancellation so live audio can be stopped without creating or saving any file.
 - Added saved-file behavior for completed streams, a fallback save path when the bundled backend does not yet expose `/tts-file`, clearer error status icons, and an open-folder button for the recordings directory.
 - Excluded the extra `Resources/tts_backend-ex` file from SwiftPM target scanning so the user's alternate backend copy stays in place without build warnings.
+- Changed newly saved recordings from WAV to AAC `.m4a` for better macOS/iOS compatibility while keeping existing `.wav` recordings visible in the library.
