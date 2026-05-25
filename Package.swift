@@ -19,6 +19,7 @@ let package = Package(
             path: "Sources/speechapp",
             exclude: [
                 "Info.plist",
+                "Resources/tts_backend-ex",
                 "Resources/tts_backend.md"
             ],
             resources: [

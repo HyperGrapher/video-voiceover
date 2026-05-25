@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFAudio
+import AppKit
 
 final class PCMStreamPlayer {
     private let engine = AVAudioEngine()
@@ -103,6 +104,12 @@ struct SavedRecording: Identifiable, Hashable {
     var title: String { url.deletingPathExtension().lastPathComponent }
 }
 
+enum OperationStatus {
+    case ready
+    case busy
+    case error
+}
+
 final class AudioPlaybackObserver: NSObject, AVAudioPlayerDelegate {
     var onFinish: (() -> Void)?
 
@@ -116,6 +123,7 @@ struct ContentView: View {
 
     @State private var textInput = "Hello! I am now streaming audio dynamically chunk by chunk."
     @State private var statusMessage = ""
+    @State private var statusKind: OperationStatus = .ready
     @State private var selectedVoice = "af_heart"
     @State private var streamTask: Task<Void, Never>?
     @State private var fileTask: Task<Void, Never>?
@@ -262,8 +270,8 @@ struct ContentView: View {
 
     private var statusView: some View {
         HStack(spacing: 8) {
-            Image(systemName: isBusy ? "circle.dotted" : "checkmark.circle")
-                .foregroundColor(isBusy ? .secondary : .green)
+            Image(systemName: statusIconName)
+                .foregroundColor(statusColor)
             Text(statusMessage.isEmpty ? backend.initializationMessage : statusMessage)
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -273,12 +281,39 @@ struct ContentView: View {
         .padding(.vertical, 10)
     }
 
+    private var statusIconName: String {
+        switch statusKind {
+        case .ready:
+            "checkmark.circle"
+        case .busy:
+            "circle.dotted"
+        case .error:
+            "exclamationmark.triangle"
+        }
+    }
+
+    private var statusColor: Color {
+        switch statusKind {
+        case .ready:
+            .green
+        case .busy:
+            .secondary
+        case .error:
+            .red
+        }
+    }
+
     private var libraryView: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text("Saved Audio")
                     .font(.system(size: 18, weight: .semibold))
                 Spacer()
+                Button(action: openRecordingsFolder) {
+                    Image(systemName: "folder")
+                }
+                .buttonStyle(.borderless)
+                .help("Open folder")
                 Button(action: loadSavedRecordings) {
                     Image(systemName: "arrow.clockwise")
                 }
@@ -347,6 +382,7 @@ struct ContentView: View {
 
         if isStreaming {
             statusMessage = "Streaming canceled"
+            statusKind = .ready
         }
 
         isStreaming = false
@@ -362,6 +398,7 @@ struct ContentView: View {
     private func generateStreamingSpeech() async {
         isStreaming = true
         statusMessage = "Opening stream handshake..."
+        statusKind = .busy
         streamPlayer?.stop()
         let player = PCMStreamPlayer()
         streamPlayer = player
@@ -385,11 +422,13 @@ struct ContentView: View {
             if Task.isCancelled {
                 player.stop()
                 statusMessage = "Streaming canceled"
+                statusKind = .ready
                 return
             }
 
             if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
                 statusMessage = "Server error: \(httpResponse.statusCode)"
+                statusKind = .error
                 return
             }
 
@@ -398,16 +437,19 @@ struct ContentView: View {
 
             var pendingNetworkBytes = Data()
             pendingNetworkBytes.reserveCapacity(4096)
+            var streamedPCM = Data()
             var hasReceivedAudio = false
 
             for try await byte in stream {
                 if Task.isCancelled {
                     player.stop()
                     statusMessage = "Streaming canceled"
+                    statusKind = .ready
                     return
                 }
 
                 pendingNetworkBytes.append(byte)
+                streamedPCM.append(byte)
 
                 if pendingNetworkBytes.count >= 4096 {
                     if !hasReceivedAudio {
@@ -424,19 +466,29 @@ struct ContentView: View {
                 try player.append(pendingNetworkBytes, flush: true)
             }
             try player.finish()
-            statusMessage = "Streaming complete"
+            if !streamedPCM.isEmpty {
+                let fileURL = try savePCMAsWAV(streamedPCM)
+                loadSavedRecordings()
+                statusMessage = "Streaming complete and saved \(fileURL.lastPathComponent)"
+            } else {
+                statusMessage = "Streaming complete"
+            }
+            statusKind = .ready
         } catch is CancellationError {
             player.stop()
             statusMessage = "Streaming canceled"
+            statusKind = .ready
         } catch {
             player.stop()
             statusMessage = "Network stream broken: \(error.localizedDescription)"
+            statusKind = .error
         }
     }
 
     private func generateSavedSpeech() async {
         isGeneratingFile = true
         statusMessage = "Generating full audio file..."
+        statusKind = .busy
 
         defer {
             fileTask = nil
@@ -453,18 +505,65 @@ struct ContentView: View {
             let (data, response) = try await URLSession.shared.data(for: request)
 
             if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
-                statusMessage = "Server error: \(httpResponse.statusCode)"
+                if httpResponse.statusCode == 404 {
+                    try await generateSavedSpeechFromStreamFallback()
+                } else {
+                    statusMessage = "Server error: \(httpResponse.statusCode)"
+                    statusKind = .error
+                }
                 return
             }
 
             let fileURL = try saveGeneratedAudio(data)
             loadSavedRecordings()
             statusMessage = "Saved \(fileURL.lastPathComponent)"
+            statusKind = .ready
         } catch is CancellationError {
             statusMessage = "File generation canceled"
+            statusKind = .ready
         } catch {
             statusMessage = "Could not save audio: \(error.localizedDescription)"
+            statusKind = .error
         }
+    }
+
+    private func generateSavedSpeechFromStreamFallback() async throws {
+        statusMessage = "Bundled backend needs packaging for /tts-file; saving through stream..."
+
+        guard let url = URL(string: "http://localhost:8000/tts") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = makeRequestBody()
+
+        let (stream, response) = try await URLSession.shared.bytes(for: request)
+
+        if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+            statusMessage = "Server error: \(httpResponse.statusCode)"
+            statusKind = .error
+            return
+        }
+
+        var pcmData = Data()
+        for try await byte in stream {
+            if Task.isCancelled {
+                statusMessage = "File generation canceled"
+                statusKind = .ready
+                return
+            }
+            pcmData.append(byte)
+        }
+
+        guard !pcmData.isEmpty else {
+            statusMessage = "No audio was generated"
+            statusKind = .error
+            return
+        }
+
+        let fileURL = try savePCMAsWAV(pcmData)
+        loadSavedRecordings()
+        statusMessage = "Saved \(fileURL.lastPathComponent)"
+        statusKind = .ready
     }
 
     private func makeRequestBody() -> Data? {
@@ -484,15 +583,62 @@ struct ContentView: View {
     }
 
     private func saveGeneratedAudio(_ data: Data) throws -> URL {
+        try saveAudioData(data, fileExtension: "wav")
+    }
+
+    private func savePCMAsWAV(_ pcmData: Data) throws -> URL {
+        try saveAudioData(wavData(fromPCM16: pcmData), fileExtension: "wav")
+    }
+
+    private func saveAudioData(_ data: Data, fileExtension: String) throws -> URL {
         let directory = try recordingsDirectory()
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
 
         let prefix = sanitizedTitlePrefix()
-        let filename = "\(formatter.string(from: Date()))_\(selectedVoice)_\(prefix).wav"
+        let filename = "\(formatter.string(from: Date()))_\(selectedVoice)_\(prefix).\(fileExtension)"
         let url = directory.appendingPathComponent(filename)
         try data.write(to: url, options: .atomic)
         return url
+    }
+
+    private func wavData(fromPCM16 pcmData: Data, sampleRate: UInt32 = 24_000, channels: UInt16 = 1) -> Data {
+        var wav = Data()
+        let bitsPerSample: UInt16 = 16
+        let byteRate = sampleRate * UInt32(channels) * UInt32(bitsPerSample / 8)
+        let blockAlign = channels * (bitsPerSample / 8)
+        let dataSize = UInt32(pcmData.count)
+        let riffSize = UInt32(36) + dataSize
+
+        appendASCII("RIFF", to: &wav)
+        appendUInt32LE(riffSize, to: &wav)
+        appendASCII("WAVE", to: &wav)
+        appendASCII("fmt ", to: &wav)
+        appendUInt32LE(16, to: &wav)
+        appendUInt16LE(1, to: &wav)
+        appendUInt16LE(channels, to: &wav)
+        appendUInt32LE(sampleRate, to: &wav)
+        appendUInt32LE(byteRate, to: &wav)
+        appendUInt16LE(blockAlign, to: &wav)
+        appendUInt16LE(bitsPerSample, to: &wav)
+        appendASCII("data", to: &wav)
+        appendUInt32LE(dataSize, to: &wav)
+        wav.append(pcmData)
+        return wav
+    }
+
+    private func appendASCII(_ string: String, to data: inout Data) {
+        data.append(contentsOf: string.utf8)
+    }
+
+    private func appendUInt16LE(_ value: UInt16, to data: inout Data) {
+        var littleEndian = value.littleEndian
+        withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+    }
+
+    private func appendUInt32LE(_ value: UInt32, to data: inout Data) {
+        var littleEndian = value.littleEndian
+        withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
     }
 
     private func sanitizedTitlePrefix() -> String {
@@ -531,6 +677,17 @@ struct ContentView: View {
         } catch {
             savedRecordings = []
             statusMessage = "Could not load saved audio: \(error.localizedDescription)"
+            statusKind = .error
+        }
+    }
+
+    private func openRecordingsFolder() {
+        do {
+            let directory = try recordingsDirectory()
+            NSWorkspace.shared.open(directory)
+        } catch {
+            statusMessage = "Could not open folder: \(error.localizedDescription)"
+            statusKind = .error
         }
     }
 
@@ -560,8 +717,10 @@ struct ContentView: View {
             playbackObserver = observer
             playingRecordingID = recording.id
             statusMessage = "Playing \(recording.url.lastPathComponent)"
+            statusKind = .ready
         } catch {
             statusMessage = "Could not play file: \(error.localizedDescription)"
+            statusKind = .error
         }
     }
 
@@ -576,8 +735,10 @@ struct ContentView: View {
             try FileManager.default.removeItem(at: recording.url)
             loadSavedRecordings()
             statusMessage = "Deleted \(recording.url.lastPathComponent)"
+            statusKind = .ready
         } catch {
             statusMessage = "Could not delete file: \(error.localizedDescription)"
+            statusKind = .error
         }
     }
 

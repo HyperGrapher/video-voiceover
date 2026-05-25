@@ -29,3 +29,5 @@ The intended streaming protocol is raw little-endian 16-bit mono PCM at 24 kHz (
 - Reworked the SwiftUI app into a two-pane macOS interface with a composer area and saved-audio library.
 - Added saved WAV file management under Application Support, including refresh, play/pause, and delete actions.
 - Added streaming cancellation so live audio can be stopped without creating or saving any file.
+- Added saved-file behavior for completed streams, a fallback save path when the bundled backend does not yet expose `/tts-file`, clearer error status icons, and an open-folder button for the recordings directory.
+- Excluded the extra `Resources/tts_backend-ex` file from SwiftPM target scanning so the user's alternate backend copy stays in place without build warnings.
