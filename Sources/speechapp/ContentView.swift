@@ -94,119 +94,319 @@ final class PCMStreamPlayer {
     }
 }
 
+struct SavedRecording: Identifiable, Hashable {
+    let url: URL
+    let createdAt: Date
+    let byteCount: Int64
+
+    var id: URL { url }
+    var title: String { url.deletingPathExtension().lastPathComponent }
+}
+
+final class AudioPlaybackObserver: NSObject, AVAudioPlayerDelegate {
+    var onFinish: (() -> Void)?
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        onFinish?()
+    }
+}
+
 struct ContentView: View {
-    // Inherit the global state from your Environment
     @EnvironmentObject var backend: BackendProcessManager
-    
-    @State private var textInput: String = "Hello! I am now streaming audio dynamically chunk by chunk."
-    @State private var statusMessage: String = ""
-    @State private var isProcessing: Bool = false
-    
+
+    @State private var textInput = "Hello! I am now streaming audio dynamically chunk by chunk."
+    @State private var statusMessage = ""
+    @State private var selectedVoice = "af_heart"
+    @State private var streamTask: Task<Void, Never>?
+    @State private var fileTask: Task<Void, Never>?
+    @State private var isStreaming = false
+    @State private var isGeneratingFile = false
     @State private var streamPlayer: PCMStreamPlayer?
-    
-    let availableVoices = ["af_heart", "af_bella", "am_adam"]
-    @State private var selectedVoice: String = "af_heart"
+    @State private var savedRecordings: [SavedRecording] = []
+    @State private var filePlayer: AVAudioPlayer?
+    @State private var playbackObserver: AudioPlaybackObserver?
+    @State private var playingRecordingID: URL?
+
+    private let availableVoices = ["af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky", "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael", "am_onyx", "am_puck", "am_santa", "bf_alice", "bf_emma", "bf_isabella", "bf_lily", "bm_daniel", "bm_fable", "bm_george", "bm_lewis", "ef_dora", "em_alex", "em_santa", "ff_siwis", "hf_alpha", "hf_beta", "hm_omega", "hm_psi", "if_sara", "im_nicola", "jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo", "pf_dora", "pm_alex", "pm_santa", "zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi", "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang"]
+
+    private var isBusy: Bool {
+        isStreaming || isGeneratingFile
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Kokoro Realtime Streaming Engine")
-                .font(.headline)
-            
+        ZStack {
+            Color(nsColor: .windowBackgroundColor)
+                .ignoresSafeArea()
+
             if !backend.isServerReady {
-                // THE LOADING UI LAYER
-                VStack(spacing: 12) {
-                    ProgressView()
-                        .controlSize(.large)
-                    Text(backend.initializationMessage)
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .transition(.opacity)
+                startupView
             } else {
-                // THE FULL OPERATIONAL UI LAYER
-                VStack(alignment: .leading, spacing: 16) {
-                    HStack {
-                        Text("Select Voice:")
-                        Picker("", selection: $selectedVoice) {
-                            ForEach(availableVoices, id: \.self) { voice in
-                                Text(voice).tag(voice)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .frame(width: 180)
-                        .disabled(isProcessing)
-                    }
-                    
-                    TextEditor(text: $textInput)
-                        .font(.body)
-                        .frame(height: 100)
-                        .padding(4)
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.gray.opacity(0.3)))
-                    
-                    HStack {
-                        Button(action: {
-                            Task { await generateStreamingSpeech() }
-                        }) {
-                            if isProcessing {
-                                ProgressView().controlSize(.small).padding(.horizontal, 4)
-                            } else {
-                                Text("Stream Sound")
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isProcessing || textInput.isEmpty)
-                        
-                        Spacer()
-                        
-                        Text(statusMessage.isEmpty ? backend.initializationMessage : statusMessage)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .lineLimit(2)
-                            .frame(maxWidth: 350, alignment: .trailing)
-                    }
-                }
-                .transition(.opacity)
+                appView
             }
         }
-        .padding()
-        .animation(.easeInOut, value: backend.isServerReady)
-        .frame(width: 650, height: 280)
+        .animation(.easeInOut(duration: 0.2), value: backend.isServerReady)
+        .frame(minWidth: 860, idealWidth: 980, minHeight: 560, idealHeight: 640)
+        .onAppear(perform: loadSavedRecordings)
+        .onDisappear {
+            cancelStreaming()
+            fileTask?.cancel()
+            filePlayer?.stop()
+        }
+    }
+
+    private var startupView: some View {
+        VStack(spacing: 14) {
+            ProgressView()
+                .controlSize(.large)
+            Text("Kokoro")
+                .font(.system(size: 24, weight: .semibold, design: .rounded))
+            Text(backend.initializationMessage)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var appView: some View {
+        HStack(spacing: 0) {
+            composerView
+                .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
+
+            Divider()
+
+            libraryView
+                .frame(width: 320)
+                .frame(maxHeight: .infinity)
+        }
+    }
+
+    private var composerView: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            headerView
+
+            TextEditor(text: $textInput)
+                .font(.system(size: 15))
+                .scrollContentBackground(.hidden)
+                .padding(10)
+                .background(.background, in: RoundedRectangle(cornerRadius: 8))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(.separator.opacity(0.8))
+                }
+                .frame(minHeight: 220)
+                .disabled(isBusy)
+
+            controlsView
+
+            Spacer()
+
+            statusView
+        }
+        .padding(24)
+    }
+
+    private var headerView: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Kokoro")
+                    .font(.system(size: 30, weight: .semibold, design: .rounded))
+                Text("Offline speech generation")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Picker("Voice", selection: $selectedVoice) {
+                ForEach(availableVoices, id: \.self) { voice in
+                    Text(voice).tag(voice)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(width: 180)
+            .disabled(isBusy)
+        }
+    }
+
+    private var controlsView: some View {
+        HStack(spacing: 10) {
+            if isStreaming {
+                Button(role: .destructive, action: cancelStreaming) {
+                    Label("Cancel Stream", systemImage: "stop.fill")
+                }
+                .buttonStyle(.borderedProminent)
+            } else {
+                Button(action: startStreaming) {
+                    Label("Stream Sound", systemImage: "waveform")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isGeneratingFile || textInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            Button(action: startFileGeneration) {
+                if isGeneratingFile {
+                    Label("Generating", systemImage: "hourglass")
+                } else {
+                    Label("Generate File", systemImage: "square.and.arrow.down")
+                }
+            }
+            .disabled(isBusy || textInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+            Spacer()
+
+            Text("\(textInput.count) chars")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var statusView: some View {
+        HStack(spacing: 8) {
+            Image(systemName: isBusy ? "circle.dotted" : "checkmark.circle")
+                .foregroundColor(isBusy ? .secondary : .green)
+            Text(statusMessage.isEmpty ? backend.initializationMessage : statusMessage)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Spacer()
+        }
+        .padding(.vertical, 10)
+    }
+
+    private var libraryView: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Saved Audio")
+                    .font(.system(size: 18, weight: .semibold))
+                Spacer()
+                Button(action: loadSavedRecordings) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .help("Refresh")
+            }
+
+            if savedRecordings.isEmpty {
+                ContentUnavailableView(
+                    "No Saved Files",
+                    systemImage: "waveform.slash",
+                    description: Text("Generated audio will appear here.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(savedRecordings) { recording in
+                    recordingRow(recording)
+                        .listRowInsets(EdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8))
+                }
+                .listStyle(.inset)
+            }
+        }
+        .padding(20)
+        .background(.regularMaterial)
+    }
+
+    private func recordingRow(_ recording: SavedRecording) -> some View {
+        HStack(spacing: 10) {
+            Button(action: { togglePlayback(for: recording) }) {
+                Image(systemName: playingRecordingID == recording.id ? "pause.fill" : "play.fill")
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.borderless)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(recording.title)
+                    .lineLimit(1)
+                    .font(.callout.weight(.medium))
+                Text(recordingSubtitle(recording))
+                    .lineLimit(1)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Button(role: .destructive, action: { deleteRecording(recording) }) {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .help("Delete")
+        }
+    }
+
+    private func startStreaming() {
+        streamTask?.cancel()
+        streamTask = Task {
+            await generateStreamingSpeech()
+        }
+    }
+
+    private func cancelStreaming() {
+        streamTask?.cancel()
+        streamTask = nil
+        streamPlayer?.stop()
+
+        if isStreaming {
+            statusMessage = "Streaming canceled"
+        }
+
+        isStreaming = false
+    }
+
+    private func startFileGeneration() {
+        fileTask?.cancel()
+        fileTask = Task {
+            await generateSavedSpeech()
+        }
     }
 
     private func generateStreamingSpeech() async {
-        isProcessing = true
+        isStreaming = true
         statusMessage = "Opening stream handshake..."
         streamPlayer?.stop()
         let player = PCMStreamPlayer()
         streamPlayer = player
-        
+
+        defer {
+            if streamTask?.isCancelled == false {
+                streamTask = nil
+            }
+            isStreaming = false
+        }
+
         guard let url = URL(string: "http://localhost:8000/tts") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
-        let body: [String: Any] = ["text": textInput, "voice": selectedVoice]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        
+        request.httpBody = makeRequestBody()
+
         do {
             let (stream, response) = try await URLSession.shared.bytes(for: request)
-            
-            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
-                statusMessage = "❌ Server error: \(httpResponse.statusCode)"
-                isProcessing = false
+
+            if Task.isCancelled {
+                player.stop()
+                statusMessage = "Streaming canceled"
                 return
             }
-            
+
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                statusMessage = "Server error: \(httpResponse.statusCode)"
+                return
+            }
+
             try player.start()
             statusMessage = "Generating first sound..."
-            
+
             var pendingNetworkBytes = Data()
             pendingNetworkBytes.reserveCapacity(4096)
             var hasReceivedAudio = false
 
             for try await byte in stream {
+                if Task.isCancelled {
+                    player.stop()
+                    statusMessage = "Streaming canceled"
+                    return
+                }
+
                 pendingNetworkBytes.append(byte)
 
                 if pendingNetworkBytes.count >= 4096 {
@@ -224,11 +424,166 @@ struct ContentView: View {
                 try player.append(pendingNetworkBytes, flush: true)
             }
             try player.finish()
-            statusMessage = "Streaming complete!"
-        } catch {
-            statusMessage = "❌ Network stream broken: \(error.localizedDescription)"
+            statusMessage = "Streaming complete"
+        } catch is CancellationError {
             player.stop()
+            statusMessage = "Streaming canceled"
+        } catch {
+            player.stop()
+            statusMessage = "Network stream broken: \(error.localizedDescription)"
         }
-        isProcessing = false
+    }
+
+    private func generateSavedSpeech() async {
+        isGeneratingFile = true
+        statusMessage = "Generating full audio file..."
+
+        defer {
+            fileTask = nil
+            isGeneratingFile = false
+        }
+
+        guard let url = URL(string: "http://localhost:8000/tts-file") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = makeRequestBody()
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                statusMessage = "Server error: \(httpResponse.statusCode)"
+                return
+            }
+
+            let fileURL = try saveGeneratedAudio(data)
+            loadSavedRecordings()
+            statusMessage = "Saved \(fileURL.lastPathComponent)"
+        } catch is CancellationError {
+            statusMessage = "File generation canceled"
+        } catch {
+            statusMessage = "Could not save audio: \(error.localizedDescription)"
+        }
+    }
+
+    private func makeRequestBody() -> Data? {
+        let body: [String: Any] = [
+            "text": textInput,
+            "voice": selectedVoice
+        ]
+
+        return try? JSONSerialization.data(withJSONObject: body)
+    }
+
+    private func recordingsDirectory() throws -> URL {
+        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let directory = root.appendingPathComponent("speechapp/Recordings", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    private func saveGeneratedAudio(_ data: Data) throws -> URL {
+        let directory = try recordingsDirectory()
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+
+        let prefix = sanitizedTitlePrefix()
+        let filename = "\(formatter.string(from: Date()))_\(selectedVoice)_\(prefix).wav"
+        let url = directory.appendingPathComponent(filename)
+        try data.write(to: url, options: .atomic)
+        return url
+    }
+
+    private func sanitizedTitlePrefix() -> String {
+        let words = textInput
+            .split(separator: " ")
+            .prefix(5)
+            .joined(separator: "-")
+            .lowercased()
+
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let scalars = words.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" }
+        let title = String(scalars).trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+        return title.isEmpty ? "speech" : title
+    }
+
+    private func loadSavedRecordings() {
+        do {
+            let directory = try recordingsDirectory()
+            let urls = try FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.creationDateKey, .fileSizeKey],
+                options: [.skipsHiddenFiles]
+            )
+
+            savedRecordings = urls
+                .filter { $0.pathExtension.lowercased() == "wav" }
+                .compactMap { url in
+                    let values = try? url.resourceValues(forKeys: [.creationDateKey, .fileSizeKey])
+                    return SavedRecording(
+                        url: url,
+                        createdAt: values?.creationDate ?? .distantPast,
+                        byteCount: Int64(values?.fileSize ?? 0)
+                    )
+                }
+                .sorted { $0.createdAt > $1.createdAt }
+        } catch {
+            savedRecordings = []
+            statusMessage = "Could not load saved audio: \(error.localizedDescription)"
+        }
+    }
+
+    private func togglePlayback(for recording: SavedRecording) {
+        if playingRecordingID == recording.id {
+            if filePlayer?.isPlaying == true {
+                filePlayer?.pause()
+            } else {
+                filePlayer?.play()
+            }
+            return
+        }
+
+        do {
+            filePlayer?.stop()
+            let player = try AVAudioPlayer(contentsOf: recording.url)
+            let observer = AudioPlaybackObserver()
+            observer.onFinish = {
+                playingRecordingID = nil
+                filePlayer = nil
+                playbackObserver = nil
+            }
+            player.delegate = observer
+            player.prepareToPlay()
+            player.play()
+            filePlayer = player
+            playbackObserver = observer
+            playingRecordingID = recording.id
+            statusMessage = "Playing \(recording.url.lastPathComponent)"
+        } catch {
+            statusMessage = "Could not play file: \(error.localizedDescription)"
+        }
+    }
+
+    private func deleteRecording(_ recording: SavedRecording) {
+        do {
+            if playingRecordingID == recording.id {
+                filePlayer?.stop()
+                filePlayer = nil
+                playingRecordingID = nil
+            }
+
+            try FileManager.default.removeItem(at: recording.url)
+            loadSavedRecordings()
+            statusMessage = "Deleted \(recording.url.lastPathComponent)"
+        } catch {
+            statusMessage = "Could not delete file: \(error.localizedDescription)"
+        }
+    }
+
+    private func recordingSubtitle(_ recording: SavedRecording) -> String {
+        let date = recording.createdAt.formatted(date: .abbreviated, time: .shortened)
+        let size = ByteCountFormatter.string(fromByteCount: recording.byteCount, countStyle: .file)
+        return "\(date) - \(size)"
     }
 }

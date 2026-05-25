@@ -25,3 +25,7 @@ The intended streaming protocol is raw little-endian 16-bit mono PCM at 24 kHz (
 - Added a short initial audio cushion in Swift before playback starts to reduce early buffer underruns and audible stutter.
 - Updated `Package.swift` to exclude non-resource target files that SwiftPM previously warned about.
 - Added this `AGENTS.md` file with app context, workflow constraints, and change logging expectations.
+- Added a non-streaming `/tts-file` backend endpoint that returns a complete WAV file for save-to-disk workflows.
+- Reworked the SwiftUI app into a two-pane macOS interface with a composer area and saved-audio library.
+- Added saved WAV file management under Application Support, including refresh, play/pause, and delete actions.
+- Added streaming cancellation so live audio can be stopped without creating or saving any file.
