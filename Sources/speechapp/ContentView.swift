@@ -2,153 +2,144 @@ import SwiftUI
 import AVFAudio
 
 struct ContentView: View {
-    @State private var textInput: String = "Hello! I am generating speech on an Intel Mac using a local Python bridge."
-    @State private var statusMessage: String = "Engine Ready"
-    @State private var isProcessing: Bool = false
-    @State private var audioPlayer: AVAudioPlayer?
+    // Inherit the global state from your Environment
+    @EnvironmentObject var backend: BackendProcessManager
     
-    // Add any voices you downloaded to your local python package layout
-    // let availableVoices = ["af_heart", "af_bella", "am_adam"]
-    let availableVoices = [
-  "af_alloy",
-  "af_aoede",
-  "af_bella",
-  "af_heart",
-  "af_jessica",
-  "af_kore",
-  "af_nicole",
-  "af_nova",
-  "af_river",
-  "af_sarah",
-  "af_sky",
-  "am_adam",
-  "am_echo",
-  "am_eric",
-  "am_fenrir",
-  "am_liam",
-  "am_michael",
-  "am_onyx",
-  "am_puck",
-  "am_santa",
-  "bf_alice",
-  "bf_emma",
-  "bf_isabella",
-  "bf_lily",
-  "bm_daniel",
-  "bm_fable",
-  "bm_george",
-  "bm_lewis",
-  "ef_dora",
-  "em_alex",
-  "em_santa",
-  "ff_siwis",
-  "hf_alpha",
-  "hf_beta",
-  "hm_omega",
-  "hm_psi",
-  "if_sara",
-  "im_nicola",
-  "jf_alpha",
-  "jf_gongitsune",
-  "jf_nezumi",
-  "jf_tebukuro",
-  "jm_kumo",
-  "pf_dora",
-  "pm_alex",
-  "pm_santa",
-  "zf_xiaobei",
-  "zf_xiaoni",
-  "zf_xiaoxiao",
-  "zf_xiaoyi",
-  "zm_yunjian",
-  "zm_yunxi",
-  "zm_yunxia",
-  "zm_yunyang"
-]
+    @State private var textInput: String = "Hello! I am now streaming audio dynamically chunk by chunk."
+    @State private var statusMessage: String = ""
+    @State private var isProcessing: Bool = false
+    
+    @State private var accumulatedData = Data()
+    @State private var audioPlayer: AVAudioPlayer?
+    @State private var hasStartedPlayback = false
+    
+    let availableVoices = ["af_heart", "af_bella", "am_adam"]
     @State private var selectedVoice: String = "af_heart"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Kokoro Intel Bridge Engine")
+            Text("Kokoro Realtime Streaming Engine")
                 .font(.headline)
             
-            HStack {
-                Text("Select Voice:")
-                Picker("", selection: $selectedVoice) {
-                    ForEach(availableVoices, id: \.self) { voice in
-                        Text(voice).tag(voice)
+            if !backend.isServerReady {
+                // THE LOADING UI LAYER
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .controlSize(.large)
+                    Text(backend.initializationMessage)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transition(.opacity)
+            } else {
+                // THE FULL OPERATIONAL UI LAYER
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        Text("Select Voice:")
+                        Picker("", selection: $selectedVoice) {
+                            ForEach(availableVoices, id: \.self) { voice in
+                                Text(voice).tag(voice)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 180)
+                        .disabled(isProcessing)
+                    }
+                    
+                    TextEditor(text: $textInput)
+                        .font(.body)
+                        .frame(height: 100)
+                        .padding(4)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.gray.opacity(0.3)))
+                    
+                    HStack {
+                        Button(action: {
+                            Task { await generateStreamingSpeech() }
+                        }) {
+                            if isProcessing {
+                                ProgressView().controlSize(.small).padding(.horizontal, 4)
+                            } else {
+                                Text("Stream Text")
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isProcessing || textInput.isEmpty)
+                        
+                        Spacer()
+                        
+                        Text(statusMessage.isEmpty ? backend.initializationMessage : statusMessage)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                            .frame(maxWidth: 350, alignment: .trailing)
                     }
                 }
-                .pickerStyle(.menu)
-                .frame(width: 180)
-                .disabled(isProcessing)
-            }
-            
-            TextEditor(text: $textInput)
-                .font(.body)
-                .frame(height: 100)
-                .padding(4)
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.gray.opacity(0.3)))
-            
-            HStack {
-                Button(action: {
-                    Task { await generateSpeech() }
-                }) {
-                    if isProcessing {
-                        ProgressView().controlSize(.small).padding(.horizontal, 4)
-                    } else {
-                        Text("Speak Text")
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(isProcessing || textInput.isEmpty)
-                
-                Spacer()
-                
-                Text(statusMessage)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .lineLimit(2)
-                    .textSelection(.enabled) // Allows you to click and drag to copy the full error text
-                    .frame(maxWidth: 350, alignment: .trailing)
+                .transition(.opacity)
             }
         }
         .padding()
+        .animation(.easeInOut, value: backend.isServerReady)
         .frame(width: 650, height: 280)
     }
 
-    private func generateSpeech() async {
+    private func generateStreamingSpeech() async {
         isProcessing = true
-        statusMessage = "Sending request to Python core..."
+        statusMessage = "Opening stream handshake..."
+        accumulatedData = Data()
+        hasStartedPlayback = false
         
         guard let url = URL(string: "http://localhost:8000/tts") else { return }
-
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
-        let body: [String: Any] = [
-            "text": textInput,
-            "voice": selectedVoice
-        ]
+        let body: [String: Any] = ["text": textInput, "voice": selectedVoice]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (stream, response) = try await URLSession.shared.bytes(for: request)
             
             if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
-                statusMessage = "❌ Server error code: \(httpResponse.statusCode)"
+                statusMessage = "❌ Server error: \(httpResponse.statusCode)"
                 isProcessing = false
                 return
             }
             
-            statusMessage = "Playing audio..."
-            audioPlayer = try AVAudioPlayer(data: data)
-            audioPlayer?.play()
-            statusMessage = "Success!"
+            statusMessage = "Receiving stream packets..."
+            
+            for try await byte in stream {
+                accumulatedData.append(byte)
+                
+                if accumulatedData.count >= 48000 && !hasStartedPlayback {
+                    hasStartedPlayback = true
+                    statusMessage = "Streaming playback active..."
+                    playCurrentBuffer()
+                }
+            }
+            
+            if !hasStartedPlayback {
+                playCurrentBuffer()
+            }
+            
+            statusMessage = "Streaming complete!"
         } catch {
-            statusMessage = "❌ Connection failed: \(error.localizedDescription)"
+            statusMessage = "❌ Network stream broken: \(error.localizedDescription)"
         }
         isProcessing = false
+    }
+    
+    private func playCurrentBuffer() {
+        let snapshotData = accumulatedData
+        DispatchQueue.main.async {
+            do {
+                self.audioPlayer = try AVAudioPlayer(data: snapshotData)
+                self.audioPlayer?.prepareToPlay()
+                self.audioPlayer?.play()
+            } catch {
+                print("Buffer decoding lag: \(error)")
+            }
+        }
     }
 }
