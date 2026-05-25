@@ -17,6 +17,10 @@ let package = Package(
             name: "speechapp",
             dependencies: [],
             path: "Sources/speechapp",
+            exclude: [
+                "Info.plist",
+                "Resources/tts_backend.md"
+            ],
             resources: [
                 // Embed the compiled python executable safely inside the target resources
                 .copy("Resources/tts_backend")

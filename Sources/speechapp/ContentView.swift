@@ -6,16 +6,20 @@ final class PCMStreamPlayer {
     private let playerNode = AVAudioPlayerNode()
     private let format: AVAudioFormat
     private var pendingData = Data()
-    private let minimumBufferedFrames = 4096
+    private let scheduleBatchFrames = 2048
+    private let initialBufferedFrames: AVAudioFramePosition
+    private var queuedFrames: AVAudioFramePosition = 0
     private var isPrepared = false
+    private var hasStartedPlayback = false
 
-    init(sampleRate: Double = 24_000) {
+    init(sampleRate: Double = 24_000, initialBufferSeconds: Double = 0.75) {
         self.format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: sampleRate,
             channels: 1,
             interleaved: false
         )!
+        self.initialBufferedFrames = AVAudioFramePosition(sampleRate * initialBufferSeconds)
     }
 
     func start() throws {
@@ -28,10 +32,6 @@ final class PCMStreamPlayer {
         if !engine.isRunning {
             try engine.start()
         }
-
-        if !playerNode.isPlaying {
-            playerNode.play()
-        }
     }
 
     func append(_ data: Data, flush: Bool = false) throws {
@@ -41,7 +41,7 @@ final class PCMStreamPlayer {
         let completeFrameCount = pendingData.count / bytesPerFrame
         guard completeFrameCount > 0 else { return }
 
-        if !flush && completeFrameCount < minimumBufferedFrames {
+        if !flush && completeFrameCount < scheduleBatchFrames {
             return
         }
 
@@ -67,17 +67,30 @@ final class PCMStreamPlayer {
             }
         }
 
+        queuedFrames += AVAudioFramePosition(completeFrameCount)
         playerNode.scheduleBuffer(buffer, completionHandler: nil)
+        startPlaybackIfReady(force: flush)
     }
 
     func finish() throws {
         try append(Data(), flush: true)
+        startPlaybackIfReady(force: true)
     }
 
     func stop() {
         playerNode.stop()
         engine.stop()
         pendingData.removeAll(keepingCapacity: true)
+        queuedFrames = 0
+        hasStartedPlayback = false
+    }
+
+    private func startPlaybackIfReady(force: Bool) {
+        guard !hasStartedPlayback else { return }
+        guard force || queuedFrames >= initialBufferedFrames else { return }
+
+        playerNode.play()
+        hasStartedPlayback = true
     }
 }
 
@@ -187,17 +200,23 @@ struct ContentView: View {
             }
             
             try player.start()
-            statusMessage = "Streaming sound..."
+            statusMessage = "Generating first sound..."
             
             var pendingNetworkBytes = Data()
-            pendingNetworkBytes.reserveCapacity(8192)
+            pendingNetworkBytes.reserveCapacity(4096)
+            var hasReceivedAudio = false
 
             for try await byte in stream {
                 pendingNetworkBytes.append(byte)
 
-                if pendingNetworkBytes.count >= 8192 {
+                if pendingNetworkBytes.count >= 4096 {
+                    if !hasReceivedAudio {
+                        hasReceivedAudio = true
+                        statusMessage = "Buffering playback..."
+                    }
                     try player.append(pendingNetworkBytes)
                     pendingNetworkBytes.removeAll(keepingCapacity: true)
+                    statusMessage = "Streaming sound..."
                 }
             }
 

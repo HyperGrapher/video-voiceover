@@ -1,4 +1,5 @@
 import array
+import re
 import sys
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -11,6 +12,8 @@ from kokoro import KPipeline
 
 app = FastAPI()
 SAMPLE_RATE = 24000
+MAX_CHUNK_CHARS = 140
+MAX_CHUNK_WORDS = 20
 
 try:
     pipeline = KPipeline(lang_code='a')
@@ -28,6 +31,34 @@ async def text_to_speech(data: dict):
     
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    def split_text_for_low_latency(source):
+        normalized = re.sub(r"\s+", " ", source.strip())
+        sentence_parts = re.split(r"(?<=[.!?;:])\s+", normalized)
+        chunks = []
+
+        for sentence in sentence_parts:
+            words = sentence.split()
+            current_words = []
+            current_length = 0
+
+            for word in words:
+                next_length = current_length + len(word) + (1 if current_words else 0)
+                if current_words and (
+                    len(current_words) >= MAX_CHUNK_WORDS
+                    or next_length > MAX_CHUNK_CHARS
+                ):
+                    chunks.append(" ".join(current_words))
+                    current_words = []
+                    current_length = 0
+
+                current_words.append(word)
+                current_length += len(word) + (1 if current_length else 0)
+
+            if current_words:
+                chunks.append(" ".join(current_words))
+
+        return chunks or [normalized]
         
     def pcm16_bytes(audio):
         if hasattr(audio, "tolist"):
@@ -48,11 +79,12 @@ async def text_to_speech(data: dict):
 
     def audio_stream_generator():
         try:
-            generator = pipeline(text, voice=voice, speed=1.0)
-            
-            for _, _, audio in generator:
-                if audio is not None and len(audio) > 0:
-                    yield pcm16_bytes(audio)
+            for chunk in split_text_for_low_latency(text):
+                generator = pipeline(chunk, voice=voice, speed=1.0)
+
+                for _, _, audio in generator:
+                    if audio is not None and len(audio) > 0:
+                        yield pcm16_bytes(audio)
         except Exception as e:
             print(f"Stream generation exception: {e}")
 
