@@ -32,3 +32,10 @@ The intended streaming protocol is raw little-endian 16-bit mono PCM at 24 kHz (
 - Added saved-file behavior for completed streams, a fallback save path when the bundled backend does not yet expose `/tts-file`, clearer error status icons, and an open-folder button for the recordings directory.
 - Excluded the extra `Resources/tts_backend-ex` file from SwiftPM target scanning so the user's alternate backend copy stays in place without build warnings.
 - Changed newly saved recordings from WAV to AAC `.m4a` for better macOS/iOS compatibility while keeping existing `.wav` recordings visible in the library.
+
+### 2026-05-26
+
+- Added a top-level `Speech` / `Video` mode switch so the existing TTS/audio workflow remains available while the app grows into video arrangement.
+- Added the first `VideoEditorView` shell with local video import, AVPlayer preview, transport controls, current-time display, and a dark editor-style layout.
+- Added a three-track timeline placeholder with ruler ticks, clip blocks, and a red draggable playhead that scrubs the imported video by x-position.
+- Kept FFmpeg development-only for this phase; no FFmpeg packaging, export, subtitle rendering, or alignment work was added.

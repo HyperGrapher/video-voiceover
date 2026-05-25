@@ -110,6 +110,13 @@ enum OperationStatus {
     case error
 }
 
+enum AppMode: String, CaseIterable, Identifiable {
+    case speech = "Speech"
+    case video = "Video"
+
+    var id: String { rawValue }
+}
+
 final class AudioPlaybackObserver: NSObject, AVAudioPlayerDelegate {
     var onFinish: (() -> Void)?
 
@@ -124,6 +131,7 @@ struct ContentView: View {
     @State private var textInput = "Hello! I am now streaming audio dynamically chunk by chunk."
     @State private var statusMessage = ""
     @State private var statusKind: OperationStatus = .ready
+    @State private var selectedAppMode: AppMode = .speech
     @State private var selectedVoice = "af_heart"
     @State private var streamTask: Task<Void, Never>?
     @State private var fileTask: Task<Void, Never>?
@@ -176,6 +184,41 @@ struct ContentView: View {
     }
 
     private var appView: some View {
+        VStack(spacing: 0) {
+            modeBar
+
+            Divider()
+
+            Group {
+                switch selectedAppMode {
+                case .speech:
+                    speechWorkspaceView
+                case .video:
+                    VideoEditorView()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private var modeBar: some View {
+        HStack {
+            Picker("Mode", selection: $selectedAppMode) {
+                ForEach(AppMode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 220)
+
+            Spacer()
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .background(.bar)
+    }
+
+    private var speechWorkspaceView: some View {
         HStack(spacing: 0) {
             composerView
                 .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
