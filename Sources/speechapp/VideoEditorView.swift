@@ -269,7 +269,9 @@ struct VideoEditorView: View {
 
     private var previewSection: some View {
         GeometryReader { proxy in
-            let previewWidth = min(proxy.size.width - 56, 960)
+            let maxPreviewWidth = max(proxy.size.width - 56, 240)
+            let maxPreviewHeight = max(proxy.size.height - 32, 140)
+            let previewWidth = min(maxPreviewWidth, maxPreviewHeight * 16 / 9, 960)
             let previewHeight = previewWidth * 9 / 16
 
             VStack {

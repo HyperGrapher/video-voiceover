@@ -34,6 +34,7 @@ This is a native macOS SwiftUI app evolving from offline Kokoro text-to-speech i
 - Reject zero-duration/invalid assets before installing them into the player.
 - Do not use SwiftUI `VideoPlayer` for the preview on this project. Crash reports showed SIGABRT inside Apple’s `_AVKit_SwiftUI` framework during import. The current fix is a plain `NSViewRepresentable` wrapper around `AVPlayerView`, which avoids that SwiftUI wrapper path while still using `AVPlayer`.
 - The normal macOS title bar is intentionally restored. Hidden-titlebar mode caused the video preview to cover the title/control area and made import controls appear missing.
+- Video mode reserves top spacing in `ContentView` and sizes the preview from both available width and height. Keep that constraint so the preview cannot expand upward over the editor header.
 
 ## Current Milestones
 

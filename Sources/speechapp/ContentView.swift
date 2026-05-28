@@ -196,10 +196,17 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             case .video:
-                VideoEditorView {
-                    selectedAppMode = .speech
+                VStack(spacing: 0) {
+                    Color.clear
+                        .frame(height: 12)
+
+                    VideoEditorView {
+                        selectedAppMode = .speech
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(red: 0.105, green: 0.105, blue: 0.112))
             }
         }
     }
