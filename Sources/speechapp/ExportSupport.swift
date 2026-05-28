@@ -64,13 +64,7 @@ enum ExportTimingBuilder {
     static func tokenize(_ transcript: String) -> [String] {
         transcript
             .components(separatedBy: CharacterSet.whitespacesAndNewlines)
-            .flatMap { chunk in
-                chunk
-                    .split { character in
-                        character.isPunctuation && character != "'" && character != "-"
-                    }
-                    .map(String.init)
-            }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
     }
 

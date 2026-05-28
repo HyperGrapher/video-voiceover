@@ -7,12 +7,12 @@ from pathlib import Path
 from .base import TimedWord
 
 
-WORD_PATTERN = re.compile(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*|[^\W\s]+", re.UNICODE)
+WORD_PATTERN = re.compile(r"\S+", re.UNICODE)
 SAMPLE_RATE = 24_000
 
 
 def tokenize_words(text: str) -> list[str]:
-    """Extract speakable words while preserving contractions and unicode letters."""
+    """Split on whitespace while preserving punctuation attached to displayed words."""
     return WORD_PATTERN.findall(text)
 
 
@@ -82,4 +82,3 @@ def write_words_json(
 class ApproximateWordAligner:
     def align(self, transcript: str, audio_duration: float) -> list[TimedWord]:
         return approximate_word_timings(transcript, audio_duration)
-
