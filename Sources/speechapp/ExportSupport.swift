@@ -20,9 +20,13 @@ struct WordsDocument: Codable {
 }
 
 enum ExportTimingBuilder {
-    static func buildWordsDocument(for narration: ProjectNarration, sampleRate: Int = 24_000) -> WordsDocument {
+    static func buildWordsDocument(
+        for narration: ProjectNarration,
+        timingMode: SubtitleTimingMode,
+        sampleRate: Int = 24_000
+    ) -> WordsDocument {
         let duration = max(narration.duration, 0)
-        let words = approximateTimings(for: narration.transcript, duration: duration)
+        let words = approximateTimings(for: narration.transcript, duration: duration, mode: timingMode)
         return WordsDocument(
             text: narration.transcript,
             sampleRate: sampleRate,
@@ -31,21 +35,29 @@ enum ExportTimingBuilder {
         )
     }
 
-    static func approximateTimings(for transcript: String, duration: Double) -> [ExportTimedWord] {
+    static func approximateTimings(
+        for transcript: String,
+        duration: Double,
+        mode: SubtitleTimingMode = .punctuationAware
+    ) -> [ExportTimedWord] {
         let tokens = tokenize(transcript)
         guard !tokens.isEmpty, duration > 0 else { return [] }
 
-        let weights = tokens.map { max(1, $0.count) }
+        let pauseWeights = tokens.map { mode == .punctuationAware ? pauseWeight(after: $0) : 0 }
+        let reservedPause = min(duration * 0.28, pauseWeights.reduce(0, +) * 0.08)
+        let spokenDuration = max(duration - reservedPause, duration * 0.72)
+        let weights = tokens.map { mode == .punctuationAware ? spokenWeight(for: $0) : Double(max(1, $0.count)) }
         let totalWeight = max(weights.reduce(0, +), 1)
         var current = 0.0
         var result: [ExportTimedWord] = []
 
         for index in tokens.indices {
+            let wordDuration = spokenDuration * weights[index] / totalWeight
             let end: Double
             if index == tokens.count - 1 {
                 end = duration
             } else {
-                end = min(duration, current + duration * Double(weights[index]) / Double(totalWeight))
+                end = min(duration, current + wordDuration)
             }
 
             result.append(ExportTimedWord(
@@ -55,7 +67,7 @@ enum ExportTimingBuilder {
                 end: roundedSeconds(end),
                 confidence: 0.4
             ))
-            current = end
+            current = min(duration, end + pauseWeights[index] * 0.08)
         }
 
         return result
@@ -71,6 +83,32 @@ enum ExportTimingBuilder {
     private static func roundedSeconds(_ value: Double) -> Double {
         (value * 10_000).rounded() / 10_000
     }
+
+    private static func spokenWeight(for token: String) -> Double {
+        let stripped = token.trimmingCharacters(in: .punctuationCharacters)
+        let characterCount = max(stripped.count, 1)
+        let vowelCount = stripped.lowercased().filter { "aeiouy".contains($0) }.count
+        let syllableHint = max(1, vowelCount)
+        return 0.55 + Double(characterCount) * 0.55 + Double(syllableHint) * 0.75
+    }
+
+    private static func pauseWeight(after token: String) -> Double {
+        if token.contains("...") || token.contains("…") {
+            return 3.0
+        }
+
+        guard let last = token.last else { return 0 }
+        switch last {
+        case ".", "!", "?":
+            return 2.2
+        case ";", ":":
+            return 1.6
+        case ",":
+            return 1.0
+        default:
+            return 0
+        }
+    }
 }
 
 enum ASSSubtitleRenderer {
@@ -80,10 +118,13 @@ enum ASSSubtitleRenderer {
         width: Int = 1920,
         height: Int = 1080
     ) -> String {
-        let events = groupWords(words, maxWords: style.maxWordsPerLine).flatMap { group in
+        let groups = groupWords(words, maxWords: style.maxWordsPerLine)
+        let events = style.isWordHighlightingEnabled ? groups.flatMap { group in
             group.map { activeWord in
                 renderEvent(group, activeWord: activeWord, style: style)
             }
+        }.joined(separator: "\n") : groups.map { group in
+            renderStaticEvent(group, style: style)
         }.joined(separator: "\n")
 
         return """
@@ -141,6 +182,12 @@ enum ASSSubtitleRenderer {
         }.joined()
 
         return "Dialogue: 0,\(formatASSTime(activeWord.start)),\(formatASSTime(activeWord.end)),Default,,0,0,0,,\(text)"
+    }
+
+    private static func renderStaticEvent(_ group: [ExportTimedWord], style: SubtitleStyleSettings) -> String {
+        guard let first = group.first, let last = group.last else { return "" }
+        let text = group.map { "{\\1c\(assOverrideColor(style.textColorHex))}\(escapeASS($0.word))" }.joined(separator: " ")
+        return "Dialogue: 0,\(formatASSTime(first.start)),\(formatASSTime(last.end)),Default,,0,0,0,,\(text)"
     }
 
     private static func formatASSTime(_ seconds: Double) -> String {
@@ -226,7 +273,10 @@ enum SwiftFFmpegRunner {
         try await verifyLibass(ffmpegURL: tools.ffmpeg)
 
         let workDirectory = try createWorkDirectory()
-        let wordsDocument = ExportTimingBuilder.buildWordsDocument(for: request.narration)
+        let wordsDocument = ExportTimingBuilder.buildWordsDocument(
+            for: request.narration,
+            timingMode: request.subtitleStyle.timingMode
+        )
         guard !wordsDocument.words.isEmpty else { throw VideoExportError.noWords }
 
         let wordsURL = workDirectory.appendingPathComponent("words.json")

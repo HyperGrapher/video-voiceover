@@ -621,7 +621,8 @@ struct SubtitlePreviewOverlay: View {
     }
 
     private var activeWordID: Int? {
-        activeGroup.first { currentTime >= $0.start && currentTime <= $0.end }?.index
+        guard style.isWordHighlightingEnabled else { return nil }
+        return activeGroup.first { currentTime >= $0.start && currentTime <= $0.end }?.index
     }
 
     var body: some View {
@@ -668,7 +669,11 @@ enum PreviewTimingBuilder {
         style: SubtitleStyleSettings
     ) -> [ExportTimedWord] {
         guard duration > 0 else { return [] }
-        let words = ExportTimingBuilder.approximateTimings(for: transcript, duration: duration)
+        let words = ExportTimingBuilder.approximateTimings(
+            for: transcript,
+            duration: duration,
+            mode: style.timingMode
+        )
         guard let activeWord = words.first(where: { currentTime >= $0.start && currentTime <= $0.end }) else {
             return []
         }
@@ -686,6 +691,21 @@ struct SubtitleStylePanel: View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Subtitles")
                 .font(.headline)
+
+            Toggle("Word Highlighting", isOn: $style.isWordHighlightingEnabled)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("Timing", selection: $style.timingMode) {
+                    ForEach(SubtitleTimingMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                ColorPicker("Current word", selection: colorBinding(for: \.activeWordColorHex), supportsOpacity: false)
+            }
+            .disabled(!style.isWordHighlightingEnabled)
+            .opacity(style.isWordHighlightingEnabled ? 1 : 0.45)
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
@@ -709,7 +729,6 @@ struct SubtitleStylePanel: View {
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                ColorPicker("Current word", selection: colorBinding(for: \.activeWordColorHex), supportsOpacity: false)
                 ColorPicker("General text", selection: colorBinding(for: \.textColorHex), supportsOpacity: false)
                 ColorPicker("Outline", selection: colorBinding(for: \.outlineColorHex), supportsOpacity: false)
             }

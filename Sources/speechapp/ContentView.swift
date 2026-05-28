@@ -165,6 +165,8 @@ struct SpeechAppProject: Codable, Identifiable, Hashable {
 }
 
 struct SubtitleStyleSettings: Codable, Hashable {
+    var isWordHighlightingEnabled: Bool
+    var timingMode: SubtitleTimingMode
     var fontSize: Double
     var activeWordColorHex: String
     var textColorHex: String
@@ -173,6 +175,8 @@ struct SubtitleStyleSettings: Codable, Hashable {
     var maxWordsPerLine: Int
 
     init(
+        isWordHighlightingEnabled: Bool = true,
+        timingMode: SubtitleTimingMode = .punctuationAware,
         fontSize: Double = 54,
         activeWordColorHex: String = "#FFD84D",
         textColorHex: String = "#FFFFFF",
@@ -180,12 +184,30 @@ struct SubtitleStyleSettings: Codable, Hashable {
         bottomMargin: Double = 58,
         maxWordsPerLine: Int = 6
     ) {
+        self.isWordHighlightingEnabled = isWordHighlightingEnabled
+        self.timingMode = timingMode
         self.fontSize = fontSize
         self.activeWordColorHex = activeWordColorHex
         self.textColorHex = textColorHex
         self.outlineColorHex = outlineColorHex
         self.bottomMargin = bottomMargin
         self.maxWordsPerLine = maxWordsPerLine
+    }
+}
+
+enum SubtitleTimingMode: String, Codable, CaseIterable, Identifiable {
+    case simple
+    case punctuationAware
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .simple:
+            "Simple"
+        case .punctuationAware:
+            "Smart"
+        }
     }
 }
 

@@ -827,7 +827,7 @@ backend/
 - [x] Add FFmpeg diagnostics screen or developer diagnostic log.
 - [x] Add video picker.
 - [x] Add subtitle style controls.
-- [ ] Add timing mode picker.
+- [x] Add timing mode picker.
 - [x] Add export button.
 - [x] Display progress messages.
 - [x] Reveal output in Finder.
@@ -843,7 +843,7 @@ backend/
 ### Phase 7: Optional Enhancements
 
 - [ ] Add original audio mixing mode.
-- [ ] Add active-word-only bold mode.
+- [x] Add active-word-only bold mode.
 - [ ] Add more subtitle presets.
 - [x] Add live SwiftUI karaoke preview.
 - [ ] Add export of `.ass`, `.vtt`, and `words.json` as optional artifacts.
