@@ -184,20 +184,23 @@ struct ContentView: View {
     }
 
     private var appView: some View {
-        VStack(spacing: 0) {
-            modeBar
+        Group {
+            switch selectedAppMode {
+            case .speech:
+                VStack(spacing: 0) {
+                    modeBar
 
-            Divider()
+                    Divider()
 
-            Group {
-                switch selectedAppMode {
-                case .speech:
                     speechWorkspaceView
-                case .video:
-                    VideoEditorView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+            case .video:
+                VideoEditorView {
+                    selectedAppMode = .speech
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 

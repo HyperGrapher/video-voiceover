@@ -2,40 +2,41 @@
 
 ## App Overview
 
-This project is a native macOS SwiftUI app that streams offline text-to-speech audio from a local Python FastAPI backend using Kokoro. The Swift app launches the bundled backend executable from `Sources/speechapp/Resources/tts_backend`, sends text and voice selections to `http://localhost:8000/tts`, and plays returned audio progressively.
+This is a native macOS SwiftUI app evolving from offline Kokoro text-to-speech into a video/audio and subtitle placement, arrangement app for easier social media content creation.
 
-The intended streaming protocol is raw little-endian 16-bit mono PCM at 24 kHz (`pcm_s16le`), not repeated WAV files. Swift converts incoming PCM into `AVAudioPCMBuffer` instances and schedules them on `AVAudioEngine`/`AVAudioPlayerNode`.
+- The Swift app launches the bundled Python FastAPI backend from `Sources/speechapp/Resources/tts_backend`.
+- `app.py` is source only. Editing it does not update the bundled executable until the user repackages the backend.
+- Live TTS uses raw little-endian 16-bit mono PCM at 24 kHz (`pcm_s16le`) from `/tts`.
+- Swift streams PCM through `AVAudioEngine`/`AVAudioPlayerNode`; do not go back to partial WAV snapshots or one-shot `AVAudioPlayer` for live streaming.
+- Saved speech recordings are AAC `.m4a` for macOS/iOS compatibility; existing `.wav` files should remain visible/playable.
+- Video work is currently an editor shell only: import, preview, transport controls, timeline, and scrubbing. No FFmpeg export, subtitle rendering, or alignment has been implemented yet.
 
-## Standing Instructions For Future Agents
+## Standing Instructions
 
-- Log meaningful project changes in this file before finishing work.
-- Do not run the Python packaging command or PyInstaller by default. Packaging takes around 5 minutes and the user will run it manually.
-- For normal verification, run the macOS Swift build and make sure it completes without warnings.
-- Do not trust earlier implementation choices just because they exist. Inspect the code and keep the streaming/audio contract explicit.
-- Keep the backend source `app.py` and bundled backend executable in mind as separate artifacts. Editing `app.py` does not update `Sources/speechapp/Resources/tts_backend` until the user packages it.
+- Log only durable, meaningful project changes here. Do not add noisy step-by-step diary entries.
+- Do not run PyInstaller or Python packaging by default. It is slow, and the user will package manually.
+- Normal verification is `swift build`; keep it warning-free.
+- FFmpeg is installed locally for development but should not be packaged or required in the current video-shell phase.
+- Inspect existing code before trusting previous implementation choices.
 
-## Change Log
+## Important Implementation Notes
 
-### 2026-05-25
+### Audio
 
-- Replaced the frontend's one-shot `AVAudioPlayer` snapshot approach with continuous PCM scheduling through `AVAudioEngine` and `AVAudioPlayerNode`.
-- Renamed the UI action from `Stream Text` to `Stream Sound`.
-- Changed the backend streaming contract in `app.py` from repeated WAV chunks to raw `pcm_s16le` bytes with explicit response headers.
-- Added backend text chunking so long inputs are split into smaller Kokoro synthesis spans before streaming. This should reduce time-to-first-audio for long sentences.
-- Added a short initial audio cushion in Swift before playback starts to reduce early buffer underruns and audible stutter.
-- Updated `Package.swift` to exclude non-resource target files that SwiftPM previously warned about.
-- Added this `AGENTS.md` file with app context, workflow constraints, and change logging expectations.
-- Added a non-streaming `/tts-file` backend endpoint that returns a complete WAV file for save-to-disk workflows.
-- Reworked the SwiftUI app into a two-pane macOS interface with a composer area and saved-audio library.
-- Added saved audio file management under Application Support, including refresh, play/pause, and delete actions.
-- Added streaming cancellation so live audio can be stopped without creating or saving any file.
-- Added saved-file behavior for completed streams, a fallback save path when the bundled backend does not yet expose `/tts-file`, clearer error status icons, and an open-folder button for the recordings directory.
-- Excluded the extra `Resources/tts_backend-ex` file from SwiftPM target scanning so the user's alternate backend copy stays in place without build warnings.
-- Changed newly saved recordings from WAV to AAC `.m4a` for better macOS/iOS compatibility while keeping existing `.wav` recordings visible in the library.
+- Backend `/tts` streams raw PCM bytes with headers describing `pcm_s16le`, 24 kHz, mono.
+- Backend `/tts-file` returns a complete WAV, but the Swift app saves generated audio as `.m4a`.
+- Completed streams are saved; canceled streams are not saved.
 
-### 2026-05-26
+### Video Import And Preview
 
-- Added a top-level `Speech` / `Video` mode switch so the existing TTS/audio workflow remains available while the app grows into video arrangement.
-- Added the first `VideoEditorView` shell with local video import, AVPlayer preview, transport controls, current-time display, and a dark editor-style layout.
-- Added a three-track timeline placeholder with ruler ticks, clip blocks, and a red draggable playhead that scrubs the imported video by x-position.
-- Kept FFmpeg development-only for this phase; no FFmpeg packaging, export, subtitle rendering, or alignment work was added.
+- Imported or dropped videos are copied into `~/Library/Application Support/speechapp/VideoImports` before AVFoundation loads them. This gives the app a stable local file path and avoids Finder/drop URL lifetime and permission problems.
+- The app uses `startAccessingSecurityScopedResource()` while copying selected/dropped files.
+- Reject zero-duration/invalid assets before installing them into the player.
+- Do not use SwiftUI `VideoPlayer` for the preview on this project. Crash reports showed SIGABRT inside Apple’s `_AVKit_SwiftUI` framework during import. The current fix is a plain `NSViewRepresentable` wrapper around `AVPlayerView`, which avoids that SwiftUI wrapper path while still using `AVPlayer`.
+- The normal macOS title bar is intentionally restored. Hidden-titlebar mode caused the video preview to cover the title/control area and made import controls appear missing.
+
+## Current Milestones
+
+- TTS screen: live streaming, cancel, save, play/delete saved recordings.
+- Video screen: import/drop video, preview with `AVPlayerView`, transport controls, three placeholder tracks, red draggable/clickable playhead for seeking.
+- Next likely work: stabilize video preview UX, then add PRD-driven subtitle/export pipeline using local FFmpeg without packaging it yet.

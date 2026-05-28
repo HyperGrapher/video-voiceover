@@ -13,7 +13,6 @@ struct speechapp: App {
             ContentView()
                 .environmentObject(backendManager)
         }
-        .windowStyle(.hiddenTitleBar)
         // Monitor scene changes to cleanly terminate the Python server when closing
         .onChange(of: scenePhase) { oldPhase, newPhase in
             if newPhase == .background {

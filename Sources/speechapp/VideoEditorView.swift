@@ -11,8 +11,10 @@ final class VideoEditorModel: ObservableObject {
     @Published var currentTime: Double = 0
     @Published var isPlaying = false
     @Published var statusMessage = "Import a video to begin arranging."
+    @Published var isDropTargeted = false
 
     let player = AVPlayer()
+    private let supportedVideoExtensions = ["mp4", "mov", "m4v", "mkv", "webm"]
 
     func importVideo() {
         let panel = NSOpenPanel()
@@ -30,11 +32,60 @@ final class VideoEditorModel: ObservableObject {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         Task {
-            await loadVideo(url)
+            await importVideo(from: url)
         }
     }
 
-    func loadVideo(_ url: URL) async {
+    func loadDroppedProviders(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }) else {
+            statusMessage = "Drop a video file such as .mp4, .mov, or .mkv."
+            return false
+        }
+
+        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+            let url: URL?
+
+            if let data = item as? Data {
+                url = URL(dataRepresentation: data, relativeTo: nil)
+            } else {
+                url = item as? URL
+            }
+
+            Task { @MainActor in
+                guard let url else {
+                    self.statusMessage = "Could not read the dropped file."
+                    return
+                }
+
+                guard self.isSupportedVideo(url) else {
+                    self.statusMessage = "Unsupported video format: \(url.pathExtension)"
+                    return
+                }
+
+                await self.importVideo(from: url)
+            }
+        }
+
+        return true
+    }
+
+    func importVideo(from sourceURL: URL) async {
+        stop()
+        statusMessage = "Importing \(sourceURL.lastPathComponent)..."
+
+        do {
+            let importedURL = try copyVideoIntoAppStorage(sourceURL)
+            await loadVideo(importedURL)
+        } catch {
+            selectedVideoURL = nil
+            duration = 0
+            currentTime = 0
+            player.replaceCurrentItem(with: nil)
+            statusMessage = "Could not import video: \(error.localizedDescription)"
+        }
+    }
+
+    private func loadVideo(_ url: URL) async {
         stop()
         selectedVideoURL = url
         statusMessage = "Loading \(url.lastPathComponent)..."
@@ -46,6 +97,10 @@ final class VideoEditorModel: ObservableObject {
             let seconds = loadedDuration.seconds
             duration = seconds.isFinite ? max(seconds, 0) : 0
             currentTime = 0
+
+            guard duration > 0 else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
 
             let item = AVPlayerItem(asset: asset)
             player.replaceCurrentItem(with: item)
@@ -107,9 +162,55 @@ final class VideoEditorModel: ObservableObject {
         player.pause()
         isPlaying = false
     }
+
+    private func isSupportedVideo(_ url: URL) -> Bool {
+        supportedVideoExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    private func copyVideoIntoAppStorage(_ sourceURL: URL) throws -> URL {
+        let didAccess = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let directory = try videoImportsDirectory()
+        let destinationURL = uniqueImportedVideoURL(for: sourceURL, in: directory)
+
+        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+        return destinationURL
+    }
+
+    private func videoImportsDirectory() throws -> URL {
+        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let directory = root.appendingPathComponent("speechapp/VideoImports", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    private func uniqueImportedVideoURL(for sourceURL: URL, in directory: URL) -> URL {
+        let baseName = sourceURL.deletingPathExtension().lastPathComponent
+        let fileExtension = sourceURL.pathExtension
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        let timestamp = formatter.string(from: Date())
+        let safeBaseName = sanitizedFilename(baseName)
+
+        return directory.appendingPathComponent("\(timestamp)_\(safeBaseName).\(fileExtension)")
+    }
+
+    private func sanitizedFilename(_ name: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let scalars = name.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" }
+        let sanitized = String(scalars).trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+        return sanitized.isEmpty ? "video" : sanitized
+    }
 }
 
 struct VideoEditorView: View {
+    let onBackToSpeech: () -> Void
+
     @StateObject private var model = VideoEditorModel()
     private let playbackTimer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
 
@@ -137,6 +238,12 @@ struct VideoEditorView: View {
 
     private var editorHeader: some View {
         HStack(spacing: 12) {
+            Button(action: onBackToSpeech) {
+                Label("Speech", systemImage: "chevron.left")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.white.opacity(0.82))
+
             Button(action: model.importVideo) {
                 Label("Import Video", systemImage: "plus")
             }
@@ -154,7 +261,8 @@ struct VideoEditorView: View {
 
             Spacer()
         }
-        .padding(.horizontal, 18)
+        .padding(.leading, 18)
+        .padding(.trailing, 18)
         .padding(.vertical, 12)
         .background(Color(red: 0.14, green: 0.13, blue: 0.14))
     }
@@ -172,25 +280,56 @@ struct VideoEditorView: View {
                         .fill(Color.black)
 
                     if model.selectedVideoURL == nil {
-                        VStack(spacing: 14) {
-                            Image(systemName: "film")
-                                .font(.system(size: 38, weight: .light))
-                                .foregroundStyle(.white.opacity(0.42))
-                            Text("Import a video")
-                                .font(.title3.weight(.medium))
-                            Text("The preview will appear here in a 16:9 canvas.")
-                                .font(.callout)
-                                .foregroundStyle(.white.opacity(0.55))
+                        VStack(spacing: 16) {
+                            Button(action: model.importVideo) {
+                                VStack(spacing: 14) {
+                                    Image(systemName: "film")
+                                        .font(.system(size: 42, weight: .light))
+                                        .foregroundStyle(.white.opacity(0.46))
+                                    Text("Import a video")
+                                        .font(.title2.weight(.semibold))
+                                    Text("Click Choose Video or drag a file here from Finder.")
+                                        .font(.callout)
+                                        .foregroundStyle(.white.opacity(0.58))
+                                }
+                            }
+                            .buttonStyle(.plain)
+
+                            Button(action: model.importVideo) {
+                                Label("Choose Video...", systemImage: "folder")
+                                    .frame(minWidth: 160)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+                        }
+                        .padding(28)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(
+                                    model.isDropTargeted ? Color(red: 1.0, green: 0.18, blue: 0.20) : Color.white.opacity(0.20),
+                                    style: StrokeStyle(lineWidth: model.isDropTargeted ? 2 : 1, dash: [8, 6])
+                                )
                         }
                     } else {
-                        VideoPlayer(player: model.player)
+                        PlayerPreviewView(player: model.player)
                             .background(Color.black)
                     }
                 }
                 .frame(width: previewWidth, height: previewHeight)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if model.selectedVideoURL == nil {
+                        model.importVideo()
+                    }
+                }
+                .onDrop(
+                    of: [UTType.fileURL.identifier],
+                    isTargeted: $model.isDropTargeted,
+                    perform: model.loadDroppedProviders
+                )
                 .overlay {
                     Rectangle()
-                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                        .stroke(model.isDropTargeted ? Color(red: 1.0, green: 0.18, blue: 0.20) : Color.white.opacity(0.08), lineWidth: model.isDropTargeted ? 2 : 1)
                 }
                 .shadow(color: .black.opacity(0.28), radius: 18, y: 10)
 
@@ -235,6 +374,24 @@ struct VideoEditorView: View {
     }
 }
 
+struct PlayerPreviewView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .none
+        view.videoGravity = .resizeAspect
+        view.player = player
+        return view
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        if nsView.player !== player {
+            nsView.player = player
+        }
+    }
+}
+
 struct TimelineViewShell: View {
     @ObservedObject var model: VideoEditorModel
 
@@ -271,12 +428,22 @@ struct TimelineViewShell: View {
                         .position(x: playheadX, y: (rulerHeight + trackHeight * CGFloat(tracks.count)) / 2)
                 }
                 .contentShape(Rectangle())
+                .onTapGesture { location in
+                    seek(from: location.x, timelineWidth: timelineWidth)
+                }
                 .gesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { value in
                             seek(from: value.location.x, timelineWidth: timelineWidth)
                         }
                 )
+                .onHover { isHovering in
+                    if isHovering {
+                        NSCursor.resizeLeftRight.push()
+                    } else {
+                        NSCursor.pop()
+                    }
+                }
             }
         }
         .background(Color(red: 0.08, green: 0.08, blue: 0.085))
