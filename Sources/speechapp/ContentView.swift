@@ -127,6 +127,7 @@ struct SpeechAppProject: Codable, Identifiable, Hashable {
     var videoURL: URL?
     var audioURLs: [URL]
     var narrations: [ProjectNarration]
+    var subtitleStyle: SubtitleStyleSettings
 
     init(name: String) {
         self.id = UUID()
@@ -136,6 +137,7 @@ struct SpeechAppProject: Codable, Identifiable, Hashable {
         self.videoURL = nil
         self.audioURLs = []
         self.narrations = []
+        self.subtitleStyle = SubtitleStyleSettings()
     }
 
     enum CodingKeys: String, CodingKey {
@@ -146,6 +148,7 @@ struct SpeechAppProject: Codable, Identifiable, Hashable {
         case videoURL
         case audioURLs
         case narrations
+        case subtitleStyle
     }
 
     init(from decoder: Decoder) throws {
@@ -157,6 +160,32 @@ struct SpeechAppProject: Codable, Identifiable, Hashable {
         self.videoURL = try container.decodeIfPresent(URL.self, forKey: .videoURL)
         self.audioURLs = try container.decodeIfPresent([URL].self, forKey: .audioURLs) ?? []
         self.narrations = try container.decodeIfPresent([ProjectNarration].self, forKey: .narrations) ?? []
+        self.subtitleStyle = try container.decodeIfPresent(SubtitleStyleSettings.self, forKey: .subtitleStyle) ?? SubtitleStyleSettings()
+    }
+}
+
+struct SubtitleStyleSettings: Codable, Hashable {
+    var fontSize: Double
+    var activeWordColorHex: String
+    var textColorHex: String
+    var outlineColorHex: String
+    var bottomMargin: Double
+    var maxWordsPerLine: Int
+
+    init(
+        fontSize: Double = 54,
+        activeWordColorHex: String = "#FFD84D",
+        textColorHex: String = "#FFFFFF",
+        outlineColorHex: String = "#000000",
+        bottomMargin: Double = 58,
+        maxWordsPerLine: Int = 6
+    ) {
+        self.fontSize = fontSize
+        self.activeWordColorHex = activeWordColorHex
+        self.textColorHex = textColorHex
+        self.outlineColorHex = outlineColorHex
+        self.bottomMargin = bottomMargin
+        self.maxWordsPerLine = maxWordsPerLine
     }
 }
 

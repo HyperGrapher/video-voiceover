@@ -2,12 +2,14 @@ import AppKit
 import AVFoundation
 import Foundation
 
-struct ExportTimedWord: Codable, Hashable {
+struct ExportTimedWord: Codable, Hashable, Identifiable {
     let index: Int
     let word: String
     let start: Double
     let end: Double
     let confidence: Double
+
+    var id: Int { index }
 }
 
 struct WordsDocument: Codable {
@@ -78,8 +80,17 @@ enum ExportTimingBuilder {
 }
 
 enum ASSSubtitleRenderer {
-    static func render(words: [ExportTimedWord], width: Int = 1920, height: Int = 1080) -> String {
-        let events = groupWords(words).map(renderEvent).joined(separator: "\n")
+    static func render(
+        words: [ExportTimedWord],
+        style: SubtitleStyleSettings,
+        width: Int = 1920,
+        height: Int = 1080
+    ) -> String {
+        let events = groupWords(words, maxWords: style.maxWordsPerLine).flatMap { group in
+            group.map { activeWord in
+                renderEvent(group, activeWord: activeWord, style: style)
+            }
+        }.joined(separator: "\n")
 
         return """
         [Script Info]
@@ -91,7 +102,7 @@ enum ASSSubtitleRenderer {
 
         [V4+ Styles]
         Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-        Style: Default,Helvetica,54,&H00FFFFFF,&H004DD8FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,4,0,2,80,80,58,1
+        Style: Default,Helvetica,\(Int(style.fontSize.rounded())),\(assColor(style.textColorHex)),\(assColor(style.activeWordColorHex)),\(assColor(style.outlineColorHex)),&H00000000,1,0,0,0,100,100,0,0,1,4,0,2,80,80,\(Int(style.bottomMargin.rounded())),1
 
         [Events]
         Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -100,7 +111,7 @@ enum ASSSubtitleRenderer {
         """
     }
 
-    private static func groupWords(_ words: [ExportTimedWord], maxWords: Int = 6, maxChars: Int = 42, maxDuration: Double = 3.5) -> [[ExportTimedWord]] {
+    static func groupWords(_ words: [ExportTimedWord], maxWords: Int = 6, maxChars: Int = 42, maxDuration: Double = 3.5) -> [[ExportTimedWord]] {
         var groups: [[ExportTimedWord]] = []
         var current: [ExportTimedWord] = []
 
@@ -124,15 +135,18 @@ enum ASSSubtitleRenderer {
         return groups
     }
 
-    private static func renderEvent(_ group: [ExportTimedWord]) -> String {
-        guard let first = group.first, let last = group.last else { return "" }
+    private static func renderEvent(
+        _ group: [ExportTimedWord],
+        activeWord: ExportTimedWord,
+        style: SubtitleStyleSettings
+    ) -> String {
         let text = group.enumerated().map { offset, word in
             let prefix = offset == 0 ? "" : " "
-            let durationCentiseconds = max(1, Int(((word.end - word.start) * 100).rounded()))
-            return "\(prefix){\\k\(durationCentiseconds)}\(escapeASS(word.word))"
+            let color = word.index == activeWord.index ? assOverrideColor(style.activeWordColorHex) : assOverrideColor(style.textColorHex)
+            return "\(prefix){\\1c\(color)}\(escapeASS(word.word))"
         }.joined()
 
-        return "Dialogue: 0,\(formatASSTime(first.start)),\(formatASSTime(last.end)),Default,,0,0,0,,\(text)"
+        return "Dialogue: 0,\(formatASSTime(activeWord.start)),\(formatASSTime(activeWord.end)),Default,,0,0,0,,\(text)"
     }
 
     private static func formatASSTime(_ seconds: Double) -> String {
@@ -152,11 +166,32 @@ enum ASSSubtitleRenderer {
             .replacingOccurrences(of: "{", with: "\\{")
             .replacingOccurrences(of: "}", with: "\\}")
     }
+
+    static func assColor(_ hexColor: String) -> String {
+        let trimmed = hexColor.trimmingCharacters(in: CharacterSet(charactersIn: "# "))
+        guard trimmed.count == 6 else { return "&H00FFFFFF" }
+
+        let red = String(trimmed.prefix(2))
+        let green = String(trimmed.dropFirst(2).prefix(2))
+        let blue = String(trimmed.suffix(2))
+        return "&H00\(blue)\(green)\(red)".uppercased()
+    }
+
+    private static func assOverrideColor(_ hexColor: String) -> String {
+        let trimmed = hexColor.trimmingCharacters(in: CharacterSet(charactersIn: "# "))
+        guard trimmed.count == 6 else { return "&HFFFFFF&" }
+
+        let red = String(trimmed.prefix(2))
+        let green = String(trimmed.dropFirst(2).prefix(2))
+        let blue = String(trimmed.suffix(2))
+        return "&H\(blue)\(green)\(red)&".uppercased()
+    }
 }
 
 struct VideoExportRequest {
     let videoURL: URL
     let narration: ProjectNarration
+    let subtitleStyle: SubtitleStyleSettings
     let outputURL: URL
 }
 
@@ -205,7 +240,10 @@ enum SwiftFFmpegRunner {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(wordsDocument).write(to: wordsURL, options: .atomic)
-        try ASSSubtitleRenderer.render(words: wordsDocument.words).write(to: subtitlesURL, atomically: true, encoding: .utf8)
+        try ASSSubtitleRenderer.render(
+            words: wordsDocument.words,
+            style: request.subtitleStyle
+        ).write(to: subtitlesURL, atomically: true, encoding: .utf8)
 
         let log = try await runFFmpeg(
             ffmpegURL: tools.ffmpeg,

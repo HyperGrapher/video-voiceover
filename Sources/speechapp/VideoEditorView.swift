@@ -309,8 +309,16 @@ struct VideoEditorView: View {
             Divider()
                 .overlay(Color.white.opacity(0.08))
 
-            previewSection
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            HStack(spacing: 0) {
+                previewSection
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                Divider()
+                    .overlay(Color.white.opacity(0.08))
+
+                SubtitleStylePanel(style: $project.subtitleStyle)
+                    .frame(width: 270)
+            }
 
             transportBar
 
@@ -436,7 +444,9 @@ struct VideoEditorView: View {
                         if let activeNarration {
                             SubtitlePreviewOverlay(
                                 narration: activeNarration,
-                                currentTime: model.currentTime
+                                currentTime: model.currentTime,
+                                style: project.subtitleStyle,
+                                previewSize: CGSize(width: previewWidth, height: previewHeight)
                             )
                             .allowsHitTesting(false)
                         }
@@ -548,6 +558,7 @@ struct VideoEditorView: View {
                 let result = try await SwiftFFmpegRunner.exportVideoWithSubtitles(VideoExportRequest(
                     videoURL: videoURL,
                     narration: narration,
+                    subtitleStyle: project.subtitleStyle,
                     outputURL: outputURL
                 ))
 
@@ -597,12 +608,15 @@ struct PlayerPreviewView: NSViewRepresentable {
 struct SubtitlePreviewOverlay: View {
     let narration: ProjectNarration
     let currentTime: Double
+    let style: SubtitleStyleSettings
+    let previewSize: CGSize
 
-    private var activeGroup: [PreviewTimedWord] {
+    private var activeGroup: [ExportTimedWord] {
         PreviewTimingBuilder.activeGroup(
             for: narration.transcript,
             duration: narration.duration,
-            currentTime: currentTime
+            currentTime: currentTime,
+            style: style
         )
     }
 
@@ -618,87 +632,135 @@ struct SubtitlePreviewOverlay: View {
                 HStack(spacing: 7) {
                     ForEach(activeGroup) { word in
                         Text(word.word)
-                            .font(.system(size: 34, weight: word.index == activeWordID ? .heavy : .bold, design: .rounded))
-                            .foregroundStyle(word.index == activeWordID ? Color(red: 1.0, green: 0.86, blue: 0.18) : .white)
+                            .font(.system(size: previewFontSize, weight: word.index == activeWordID ? .heavy : .bold, design: .rounded))
+                            .foregroundStyle(word.index == activeWordID ? Color(hex: style.activeWordColorHex) : Color(hex: style.textColorHex))
                             .shadow(color: .black, radius: 2, x: 0, y: 1)
                     }
                 }
                 .multilineTextAlignment(.center)
-                .lineLimit(2)
-                .minimumScaleFactor(0.55)
+                .lineLimit(1)
+                .minimumScaleFactor(0.45)
                 .padding(.horizontal, 22)
                 .padding(.vertical, 10)
                 .background(.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 8))
-                .padding(.bottom, 34)
+                .padding(.bottom, previewBottomMargin)
+                .frame(maxWidth: previewSize.width - 44)
                 .transition(.opacity)
             }
         }
         .animation(.easeInOut(duration: 0.12), value: activeGroup)
     }
-}
 
-struct PreviewTimedWord: Identifiable, Hashable {
-    let index: Int
-    let word: String
-    let start: Double
-    let end: Double
+    private var previewFontSize: Double {
+        max(10, style.fontSize * Double(previewSize.width / 1920))
+    }
 
-    var id: Int { index }
+    private var previewBottomMargin: Double {
+        max(6, style.bottomMargin * Double(previewSize.height / 1080))
+    }
 }
 
 enum PreviewTimingBuilder {
-    static func activeGroup(for transcript: String, duration: Double, currentTime: Double) -> [PreviewTimedWord] {
+    static func activeGroup(
+        for transcript: String,
+        duration: Double,
+        currentTime: Double,
+        style: SubtitleStyleSettings
+    ) -> [ExportTimedWord] {
         guard duration > 0 else { return [] }
-        let words = approximateTimings(for: transcript, duration: duration)
-        guard let activeIndex = words.firstIndex(where: { currentTime >= $0.start && currentTime <= $0.end }) else {
+        let words = ExportTimingBuilder.approximateTimings(for: transcript, duration: duration)
+        guard let activeWord = words.first(where: { currentTime >= $0.start && currentTime <= $0.end }) else {
             return []
         }
 
-        let groupStart = max(0, activeIndex - activeIndex % 6)
-        let groupEnd = min(words.count, groupStart + 6)
-        return Array(words[groupStart..<groupEnd])
+        return ASSSubtitleRenderer
+            .groupWords(words, maxWords: style.maxWordsPerLine)
+            .first { group in group.contains { $0.index == activeWord.index } } ?? []
     }
+}
 
-    private static func approximateTimings(for transcript: String, duration: Double) -> [PreviewTimedWord] {
-        let tokens = tokenize(transcript)
-        guard !tokens.isEmpty else { return [] }
+struct SubtitleStylePanel: View {
+    @Binding var style: SubtitleStyleSettings
 
-        let weights = tokens.map { max(1, $0.count) }
-        let totalWeight = max(weights.reduce(0, +), 1)
-        var current = 0.0
-        var result: [PreviewTimedWord] = []
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Subtitles")
+                .font(.headline)
 
-        for tokenIndex in tokens.indices {
-            let end: Double
-            if tokenIndex == tokens.count - 1 {
-                end = duration
-            } else {
-                end = min(duration, current + duration * Double(weights[tokenIndex]) / Double(totalWeight))
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Size")
+                    Spacer()
+                    Text("\(Int(style.fontSize.rounded()))")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                Slider(value: $style.fontSize, in: 28...96, step: 1)
             }
 
-            result.append(PreviewTimedWord(
-                index: tokenIndex,
-                word: tokens[tokenIndex],
-                start: current,
-                end: end
-            ))
-            current = end
+            Stepper(value: $style.maxWordsPerLine, in: 2...9) {
+                HStack {
+                    Text("Words per line")
+                    Spacer()
+                    Text("\(style.maxWordsPerLine)")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                ColorPicker("Current word", selection: colorBinding(for: \.activeWordColorHex), supportsOpacity: false)
+                ColorPicker("General text", selection: colorBinding(for: \.textColorHex), supportsOpacity: false)
+                ColorPicker("Outline", selection: colorBinding(for: \.outlineColorHex), supportsOpacity: false)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Bottom margin")
+                    Spacer()
+                    Text("\(Int(style.bottomMargin.rounded()))")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                Slider(value: $style.bottomMargin, in: 24...180, step: 1)
+            }
+
+            Spacer()
+        }
+        .padding(18)
+        .background(Color(red: 0.12, green: 0.12, blue: 0.13))
+        .foregroundStyle(.white)
+    }
+
+    private func colorBinding(for keyPath: WritableKeyPath<SubtitleStyleSettings, String>) -> Binding<Color> {
+        Binding(
+            get: { Color(hex: style[keyPath: keyPath]) },
+            set: { style[keyPath: keyPath] = $0.hexString() }
+        )
+    }
+}
+
+private extension Color {
+    init(hex: String) {
+        let trimmed = hex.trimmingCharacters(in: CharacterSet(charactersIn: "# "))
+        guard trimmed.count == 6, let value = Int(trimmed, radix: 16) else {
+            self = .white
+            return
         }
 
-        return result
+        self = Color(
+            red: Double((value >> 16) & 0xFF) / 255,
+            green: Double((value >> 8) & 0xFF) / 255,
+            blue: Double(value & 0xFF) / 255
+        )
     }
 
-    private static func tokenize(_ transcript: String) -> [String] {
-        transcript
-            .components(separatedBy: CharacterSet.whitespacesAndNewlines)
-            .flatMap { chunk in
-                chunk
-                    .split { character in
-                        character.isPunctuation && character != "'" && character != "-"
-                    }
-                    .map(String.init)
-            }
-            .filter { !$0.isEmpty }
+    func hexString() -> String {
+        let color = NSColor(self).usingColorSpace(.sRGB) ?? .white
+        let red = max(0, min(255, Int((color.redComponent * 255).rounded())))
+        let green = max(0, min(255, Int((color.greenComponent * 255).rounded())))
+        let blue = max(0, min(255, Int((color.blueComponent * 255).rounded())))
+        return String(format: "#%02X%02X%02X", red, green, blue)
     }
 }
 

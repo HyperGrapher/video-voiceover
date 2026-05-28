@@ -826,7 +826,7 @@ backend/
 - [x] Add central Swift `FFmpegRunner`.
 - [x] Add FFmpeg diagnostics screen or developer diagnostic log.
 - [x] Add video picker.
-- [ ] Add subtitle style controls.
+- [x] Add subtitle style controls.
 - [ ] Add timing mode picker.
 - [x] Add export button.
 - [x] Display progress messages.

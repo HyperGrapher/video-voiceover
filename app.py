@@ -117,12 +117,11 @@ async def text_to_speech_file(data: dict):
 
     try:
         samples = []
-        for chunk in split_text_for_low_latency(text):
-            generator = pipeline(chunk, voice=voice, speed=1.0)
+        generator = pipeline(text, voice=voice, speed=1.0)
 
-            for _, _, audio in generator:
-                if audio is not None and len(audio) > 0:
-                    samples.extend(audio_samples(audio))
+        for _, _, audio in generator:
+            if audio is not None and len(audio) > 0:
+                samples.extend(audio_samples(audio))
 
         if not samples:
             raise HTTPException(status_code=500, detail="No audio was generated")
