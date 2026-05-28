@@ -15,6 +15,8 @@ final class VideoEditorModel: ObservableObject {
 
     let player = AVPlayer()
     private let supportedVideoExtensions = ["mp4", "mov", "m4v", "mkv", "webm"]
+    private var narrationURL: URL?
+    private var narrationPlayer: AVAudioPlayer?
     var onVideoImported: ((URL) -> Void)?
 
     func importVideo() {
@@ -84,6 +86,7 @@ final class VideoEditorModel: ObservableObject {
             selectedVideoURL = nil
             duration = 0
             currentTime = 0
+            narrationPlayer?.stop()
             player.replaceCurrentItem(with: nil)
             statusMessage = "Could not import video: \(error.localizedDescription)"
         }
@@ -114,6 +117,7 @@ final class VideoEditorModel: ObservableObject {
             selectedVideoURL = nil
             duration = 0
             currentTime = 0
+            narrationPlayer?.stop()
             player.replaceCurrentItem(with: nil)
             statusMessage = "Could not load video: \(error.localizedDescription)"
         }
@@ -127,6 +131,7 @@ final class VideoEditorModel: ObservableObject {
             duration = 0
             currentTime = 0
             isPlaying = false
+            narrationPlayer?.stop()
             player.replaceCurrentItem(with: nil)
             statusMessage = "Import a video to begin arranging."
             return
@@ -137,17 +142,42 @@ final class VideoEditorModel: ObservableObject {
         }
     }
 
+    func loadProjectNarration(_ narration: ProjectNarration?) {
+        guard narrationURL != narration?.url else { return }
+
+        narrationPlayer?.stop()
+        narrationPlayer = nil
+        narrationURL = narration?.url
+        player.isMuted = narration != nil
+
+        guard let narration else {
+            return
+        }
+
+        do {
+            let audioPlayer = try AVAudioPlayer(contentsOf: narration.url)
+            audioPlayer.prepareToPlay()
+            audioPlayer.currentTime = min(max(currentTime, 0), audioPlayer.duration)
+            narrationPlayer = audioPlayer
+            statusMessage = "Loaded narration \(narration.url.lastPathComponent)"
+        } catch {
+            statusMessage = "Could not load narration audio: \(error.localizedDescription)"
+        }
+    }
+
     func togglePlayback() {
         guard selectedVideoURL != nil else { return }
 
         if isPlaying {
             player.pause()
+            narrationPlayer?.pause()
             isPlaying = false
         } else {
             if duration > 0 && currentTime >= duration {
                 seek(to: 0)
             }
             player.play()
+            playNarrationIfAvailable()
             isPlaying = true
         }
     }
@@ -168,6 +198,7 @@ final class VideoEditorModel: ObservableObject {
             toleranceBefore: .zero,
             toleranceAfter: .zero
         )
+        syncNarration(to: clamped)
     }
 
     func syncCurrentTimeFromPlayer() {
@@ -176,13 +207,37 @@ final class VideoEditorModel: ObservableObject {
 
         currentTime = min(max(seconds, 0), duration)
         if isPlaying && duration > 0 && currentTime >= duration {
+            narrationPlayer?.stop()
             isPlaying = false
         }
     }
 
     private func stop() {
         player.pause()
+        narrationPlayer?.pause()
         isPlaying = false
+    }
+
+    private func playNarrationIfAvailable() {
+        guard let narrationPlayer else { return }
+
+        syncNarration(to: currentTime)
+        if currentTime < narrationPlayer.duration {
+            narrationPlayer.play()
+        }
+    }
+
+    private func syncNarration(to seconds: Double) {
+        guard let narrationPlayer else { return }
+
+        let clamped = min(max(seconds, 0), narrationPlayer.duration)
+        narrationPlayer.currentTime = clamped
+        if isPlaying && clamped < narrationPlayer.duration && !narrationPlayer.isPlaying {
+            narrationPlayer.play()
+        }
+        if clamped >= narrationPlayer.duration {
+            narrationPlayer.pause()
+        }
     }
 
     private func isSupportedVideo(_ url: URL) -> Bool {
@@ -272,9 +327,13 @@ struct VideoEditorView: View {
                 project.videoURL = url
             }
             model.loadProjectVideo(project.videoURL)
+            model.loadProjectNarration(activeNarration)
         }
         .onChange(of: project.videoURL) { _, newURL in
             model.loadProjectVideo(newURL)
+        }
+        .onChange(of: project.narrations) { _, _ in
+            model.loadProjectNarration(activeNarration)
         }
         .onReceive(playbackTimer) { _ in
             model.syncCurrentTimeFromPlayer()
@@ -462,6 +521,7 @@ struct VideoEditorView: View {
         }
 
         project.narrations.append(narration)
+        model.loadProjectNarration(narration)
         renderMessage = "Narration placed into audio/subtitle tracks"
         isShowingNarration = false
     }
