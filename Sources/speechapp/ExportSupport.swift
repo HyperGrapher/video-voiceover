@@ -22,17 +22,34 @@ struct WordsDocument: Codable {
 enum ExportTimingBuilder {
     static func buildWordsDocument(
         for narration: ProjectNarration,
-        timingMode: SubtitleTimingMode,
+        style: SubtitleStyleSettings,
         sampleRate: Int = 24_000
     ) -> WordsDocument {
         let duration = max(narration.duration, 0)
-        let words = wordTimings(for: narration, mode: timingMode)
+        let words = shiftedTimings(
+            wordTimings(for: narration, mode: style.timingMode),
+            offset: style.timingOffset
+        )
         return WordsDocument(
             text: narration.transcript,
             sampleRate: sampleRate,
             duration: duration,
             words: words
         )
+    }
+
+    static func shiftedTimings(_ words: [ExportTimedWord], offset: Double) -> [ExportTimedWord] {
+        guard offset != 0 else { return words }
+
+        return words.map { word in
+            ExportTimedWord(
+                index: word.index,
+                word: word.word,
+                start: roundedSeconds(max(0, word.start + offset)),
+                end: roundedSeconds(max(0.01, word.end + offset)),
+                confidence: word.confidence
+            )
+        }
     }
 
     static func wordTimings(for narration: ProjectNarration, mode: SubtitleTimingMode) -> [ExportTimedWord] {
@@ -289,7 +306,7 @@ enum SwiftFFmpegRunner {
         let workDirectory = try createWorkDirectory()
         let wordsDocument = ExportTimingBuilder.buildWordsDocument(
             for: request.narration,
-            timingMode: request.subtitleStyle.timingMode
+            style: request.subtitleStyle
         )
         guard !wordsDocument.words.isEmpty else { throw VideoExportError.noWords }
 

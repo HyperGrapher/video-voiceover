@@ -177,6 +177,7 @@ struct SubtitleStyleSettings: Codable, Hashable {
     var activeWordColorHex: String
     var textColorHex: String
     var outlineColorHex: String
+    var timingOffset: Double
     var bottomMargin: Double
     var maxWordsPerLine: Int
 
@@ -187,6 +188,7 @@ struct SubtitleStyleSettings: Codable, Hashable {
         activeWordColorHex: String = "#FFD84D",
         textColorHex: String = "#FFFFFF",
         outlineColorHex: String = "#000000",
+        timingOffset: Double = 0,
         bottomMargin: Double = 58,
         maxWordsPerLine: Int = 6
     ) {
@@ -196,6 +198,7 @@ struct SubtitleStyleSettings: Codable, Hashable {
         self.activeWordColorHex = activeWordColorHex
         self.textColorHex = textColorHex
         self.outlineColorHex = outlineColorHex
+        self.timingOffset = timingOffset
         self.bottomMargin = bottomMargin
         self.maxWordsPerLine = maxWordsPerLine
     }

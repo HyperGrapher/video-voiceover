@@ -304,7 +304,7 @@ struct VideoEditorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            editorHeader
+            editorStatusBar
 
             Divider()
                 .overlay(Color.white.opacity(0.08))
@@ -327,6 +327,29 @@ struct VideoEditorView: View {
         }
         .foregroundStyle(.white)
         .background(Color(red: 0.105, green: 0.105, blue: 0.112))
+        .toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                Button(action: onCloseProject) {
+                    Label("Projects", systemImage: "chevron.left")
+                }
+            }
+
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button(action: model.importVideo) {
+                    Label("Import Video", systemImage: "plus")
+                }
+
+                Button(action: { isShowingNarration = true }) {
+                    Label("Add Narration", systemImage: "waveform.and.mic")
+                }
+
+                Button(action: renderVideoWithSubtitles) {
+                    Label(isRendering ? "Rendering" : "Render", systemImage: isRendering ? "hourglass" : "square.and.arrow.up")
+                }
+                .disabled(isRendering || project.videoURL == nil || project.narrations.isEmpty)
+                .help(renderButtonHelp)
+            }
+        }
         .sheet(isPresented: $isShowingNarration) {
             SpeechNarrationView(
                 onPlaceRecording: placeNarrationIntoTrack,
@@ -352,50 +375,20 @@ struct VideoEditorView: View {
         }
     }
 
-    private var editorHeader: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(project.name)
-                    .font(.headline)
-                    .lineLimit(1)
-                Text(editorStatusLine)
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.58))
-                    .lineLimit(1)
-            }
-
-            HStack(spacing: 10) {
-                Button(action: onCloseProject) {
-                    Label("Projects", systemImage: "chevron.left")
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.white.opacity(0.82))
-
-                Button(action: model.importVideo) {
-                    Label("Import Video", systemImage: "plus")
-                }
-                .buttonStyle(.borderedProminent)
-
-                Button(action: { isShowingNarration = true }) {
-                    Label("Add Narration", systemImage: "waveform.and.mic")
-                }
-                .buttonStyle(.bordered)
-
-                Button(action: renderVideoWithSubtitles) {
-                    Label(isRendering ? "Rendering" : "Render", systemImage: isRendering ? "hourglass" : "square.and.arrow.up")
-                }
-                .buttonStyle(.bordered)
-                .disabled(isRendering || project.videoURL == nil || project.narrations.isEmpty)
-                .help(renderButtonHelp)
-
-                Spacer(minLength: 0)
-            }
-            .controlSize(.small)
+    private var editorStatusBar: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(project.name)
+                .font(.headline)
+                .lineLimit(1)
+            Text(editorStatusLine)
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.58))
+                .lineLimit(1)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.leading, 18)
         .padding(.trailing, 18)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
+        .padding(.vertical, 8)
         .background(Color(red: 0.14, green: 0.13, blue: 0.14))
     }
 
@@ -678,12 +671,13 @@ enum PreviewTimingBuilder {
             for: narration,
             mode: style.timingMode
         )
-        guard let activeWord = words.first(where: { currentTime >= $0.start && currentTime <= $0.end }) else {
+        let shiftedWords = ExportTimingBuilder.shiftedTimings(words, offset: style.timingOffset)
+        guard let activeWord = shiftedWords.first(where: { currentTime >= $0.start && currentTime <= $0.end }) else {
             return []
         }
 
         return ASSSubtitleRenderer
-            .groupWords(words, maxWords: style.maxWordsPerLine)
+            .groupWords(shiftedWords, maxWords: style.maxWordsPerLine)
             .first { group in group.contains { $0.index == activeWord.index } } ?? []
     }
 }
@@ -692,65 +686,90 @@ struct SubtitleStylePanel: View {
     @Binding var style: SubtitleStyleSettings
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("Subtitles")
-                .font(.headline)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Subtitles")
+                    .font(.headline)
 
-            Toggle("Word Highlighting", isOn: $style.isWordHighlightingEnabled)
+                Toggle("Word Highlighting", isOn: $style.isWordHighlightingEnabled)
 
-            VStack(alignment: .leading, spacing: 10) {
-                Picker("Timing", selection: $style.timingMode) {
-                    ForEach(SubtitleTimingMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
+                VStack(alignment: .leading, spacing: 10) {
+                    Picker("Timing", selection: $style.timingMode) {
+                        ForEach(SubtitleTimingMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    ColorPicker("Current word", selection: colorBinding(for: \.activeWordColorHex), supportsOpacity: false)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Timing offset")
+                            Spacer()
+                            Text(offsetLabel)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                        Slider(value: $style.timingOffset, in: -0.75...0.75, step: 0.01)
+                        HStack(spacing: 8) {
+                            Button(action: { style.timingOffset = max(-0.75, style.timingOffset - 0.05) }) {
+                                Image(systemName: "minus")
+                            }
+                            Button(action: { style.timingOffset = 0 }) {
+                                Image(systemName: "arrow.counterclockwise")
+                            }
+                            Button(action: { style.timingOffset = min(0.75, style.timingOffset + 0.05) }) {
+                                Image(systemName: "plus")
+                            }
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Adjust subtitle timing")
                     }
                 }
-                .pickerStyle(.segmented)
+                .disabled(!style.isWordHighlightingEnabled)
+                .opacity(style.isWordHighlightingEnabled ? 1 : 0.45)
 
-                ColorPicker("Current word", selection: colorBinding(for: \.activeWordColorHex), supportsOpacity: false)
-            }
-            .disabled(!style.isWordHighlightingEnabled)
-            .opacity(style.isWordHighlightingEnabled ? 1 : 0.45)
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Size")
-                    Spacer()
-                    Text("\(Int(style.fontSize.rounded()))")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Size")
+                        Spacer()
+                        Text("\(Int(style.fontSize.rounded()))")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(value: $style.fontSize, in: 28...96, step: 1)
                 }
-                Slider(value: $style.fontSize, in: 28...96, step: 1)
-            }
 
-            Stepper(value: $style.maxWordsPerLine, in: 2...9) {
-                HStack {
-                    Text("Words per line")
-                    Spacer()
-                    Text("\(style.maxWordsPerLine)")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                Stepper(value: $style.maxWordsPerLine, in: 2...9) {
+                    HStack {
+                        Text("Words per line")
+                        Spacer()
+                        Text("\(style.maxWordsPerLine)")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    ColorPicker("General text", selection: colorBinding(for: \.textColorHex), supportsOpacity: false)
+                    ColorPicker("Outline", selection: colorBinding(for: \.outlineColorHex), supportsOpacity: false)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Bottom margin")
+                        Spacer()
+                        Text("\(Int(style.bottomMargin.rounded()))")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(value: $style.bottomMargin, in: 24...180, step: 1)
                 }
             }
-
-            VStack(alignment: .leading, spacing: 10) {
-                ColorPicker("General text", selection: colorBinding(for: \.textColorHex), supportsOpacity: false)
-                ColorPicker("Outline", selection: colorBinding(for: \.outlineColorHex), supportsOpacity: false)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Bottom margin")
-                    Spacer()
-                    Text("\(Int(style.bottomMargin.rounded()))")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                }
-                Slider(value: $style.bottomMargin, in: 24...180, step: 1)
-            }
-
-            Spacer()
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .padding(18)
         .background(Color(red: 0.12, green: 0.12, blue: 0.13))
         .foregroundStyle(.white)
     }
@@ -760,6 +779,10 @@ struct SubtitleStylePanel: View {
             get: { Color(hex: style[keyPath: keyPath]) },
             set: { style[keyPath: keyPath] = $0.hexString() }
         )
+    }
+
+    private var offsetLabel: String {
+        String(format: "%+.2fs", style.timingOffset)
     }
 }
 
