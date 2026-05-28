@@ -296,6 +296,9 @@ struct VideoEditorView: View {
     @State private var isShowingNarration = false
     @State private var renderMessage = ""
     @State private var isRendering = false
+    @State private var exportDiagnosticsLog = ""
+    @State private var isShowingExportDiagnostics = false
+    @State private var shouldReplaceNarrationOnPlace = false
     private let playbackTimer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
 
     private var activeNarration: ProjectNarration? {
@@ -322,7 +325,12 @@ struct VideoEditorView: View {
 
             transportBar
 
-            TimelineViewShell(model: model, project: project)
+            TimelineViewShell(
+                model: model,
+                project: project,
+                onReplaceNarration: replaceNarrationFromTimeline,
+                onDeleteNarration: deleteNarrationFromTimeline
+            )
                 .frame(height: 260)
         }
         .foregroundStyle(.white)
@@ -339,7 +347,10 @@ struct VideoEditorView: View {
                     Label("Import Video", systemImage: "plus")
                 }
 
-                Button(action: { isShowingNarration = true }) {
+                Button(action: {
+                    shouldReplaceNarrationOnPlace = false
+                    isShowingNarration = true
+                }) {
                     Label("Add Narration", systemImage: "waveform.and.mic")
                 }
 
@@ -351,11 +362,11 @@ struct VideoEditorView: View {
             }
         }
         .sheet(isPresented: $isShowingNarration) {
-            SpeechNarrationView(
-                onPlaceRecording: placeNarrationIntoTrack,
-                shouldAlignWords: project.subtitleStyle.timingMode == .forced
-            )
+            SpeechNarrationView(onPlaceRecording: placeNarrationIntoTrack)
                 .environmentObject(backend)
+        }
+        .sheet(isPresented: $isShowingExportDiagnostics) {
+            ExportDiagnosticsView(log: exportDiagnosticsLog)
         }
         .onAppear {
             model.onVideoImported = { url in
@@ -527,6 +538,12 @@ struct VideoEditorView: View {
     }
 
     private func placeNarrationIntoTrack(_ narration: ProjectNarration) {
+        if shouldReplaceNarrationOnPlace {
+            project.audioURLs.removeAll { url in project.narrations.contains { $0.url == url } }
+            project.narrations.removeAll()
+            shouldReplaceNarrationOnPlace = false
+        }
+
         if !project.audioURLs.contains(narration.url) {
             project.audioURLs.append(narration.url)
         }
@@ -535,6 +552,19 @@ struct VideoEditorView: View {
         model.loadProjectNarration(narration)
         renderMessage = "Narration placed into audio/subtitle tracks"
         isShowingNarration = false
+    }
+
+    private func replaceNarrationFromTimeline() {
+        shouldReplaceNarrationOnPlace = true
+        isShowingNarration = true
+    }
+
+    private func deleteNarrationFromTimeline() {
+        let narrationURLs = Set(project.narrations.map(\.url))
+        project.narrations.removeAll()
+        project.audioURLs.removeAll { narrationURLs.contains($0) }
+        model.loadProjectNarration(nil)
+        renderMessage = "Removed narration from audio/subtitle tracks"
     }
 
     private func renderVideoWithSubtitles() {
@@ -565,12 +595,15 @@ struct VideoEditorView: View {
                 await MainActor.run {
                     isRendering = false
                     renderMessage = "Exported \(result.outputURL.lastPathComponent)"
+                    exportDiagnosticsLog = result.ffmpegLog
                     NSWorkspace.shared.activateFileViewerSelecting([result.outputURL])
                 }
             } catch {
                 await MainActor.run {
                     isRendering = false
                     renderMessage = error.localizedDescription
+                    exportDiagnosticsLog = exportLog(from: error)
+                    isShowingExportDiagnostics = true
                 }
             }
         }
@@ -584,6 +617,14 @@ struct VideoEditorView: View {
         panel.isExtensionHidden = false
         panel.allowedContentTypes = [.mpeg4Movie]
         return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    private func exportLog(from error: Error) -> String {
+        if case VideoExportError.processFailed(let log) = error {
+            return log
+        }
+
+        return error.localizedDescription
     }
 }
 
@@ -602,6 +643,37 @@ struct PlayerPreviewView: NSViewRepresentable {
         if nsView.player !== player {
             nsView.player = player
         }
+    }
+}
+
+struct ExportDiagnosticsView: View {
+    let log: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Export Diagnostics")
+                    .font(.headline)
+                Spacer()
+                Button("Done") {
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+
+            ScrollView {
+                Text(log.isEmpty ? "No FFmpeg log was captured." : log)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+            }
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .padding(20)
+        .frame(minWidth: 640, minHeight: 420)
     }
 }
 
@@ -813,6 +885,8 @@ private extension Color {
 struct TimelineViewShell: View {
     @ObservedObject var model: VideoEditorModel
     let project: SpeechAppProject
+    let onReplaceNarration: () -> Void
+    let onDeleteNarration: () -> Void
 
     private let labelColumnWidth: CGFloat = 84
     private let rulerHeight: CGFloat = 34
@@ -936,6 +1010,15 @@ struct TimelineViewShell: View {
                                 .lineLimit(1)
                                 .padding(.horizontal, 10)
                         }
+                        .overlay(alignment: .trailing) {
+                            if index == 1 {
+                                narrationTrackActions
+                                    .padding(.trailing, 8)
+                            } else if index == 2 {
+                                timingBadge
+                                    .padding(.trailing, 10)
+                            }
+                        }
                         .padding(.horizontal, 0)
                 }
             }
@@ -946,6 +1029,31 @@ struct TimelineViewShell: View {
             }
             .frame(width: timelineWidth)
         }
+    }
+
+    private var narrationTrackActions: some View {
+        HStack(spacing: 6) {
+            Button(action: onReplaceNarration) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+            }
+            .help("Replace narration")
+
+            Button(role: .destructive, action: onDeleteNarration) {
+                Image(systemName: "trash")
+            }
+            .help("Delete narration")
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.white.opacity(0.90))
+    }
+
+    private var timingBadge: some View {
+        Text(project.subtitleStyle.timingMode.title)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.white.opacity(0.82))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(.black.opacity(0.20), in: Capsule())
     }
 
     private func shouldShowClip(for trackIndex: Int) -> Bool {

@@ -53,10 +53,6 @@ enum ExportTimingBuilder {
     }
 
     static func wordTimings(for narration: ProjectNarration, mode: SubtitleTimingMode) -> [ExportTimedWord] {
-        if mode == .forced, !narration.wordTimings.isEmpty {
-            return narration.wordTimings
-        }
-
         let fallbackMode: SubtitleTimingMode = mode == .simple ? .simple : .punctuationAware
         return approximateTimings(
             for: narration.transcript,
@@ -73,7 +69,7 @@ enum ExportTimingBuilder {
         let tokens = tokenize(transcript)
         guard !tokens.isEmpty, duration > 0 else { return [] }
 
-        let useSmartTiming = mode == .punctuationAware || mode == .forced
+        let useSmartTiming = mode == .punctuationAware
         let pauseWeights = tokens.map { useSmartTiming ? pauseWeight(after: $0) : 0 }
         let reservedPause = min(duration * 0.28, pauseWeights.reduce(0, +) * 0.08)
         let spokenDuration = max(duration - reservedPause, duration * 0.72)
