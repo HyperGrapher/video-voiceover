@@ -807,7 +807,7 @@ backend/
 - [x] Add `video/ffmpeg_runner.py`.
 - [x] Add replace-audio export command.
 - [x] Add safe temp export directory creation.
-- [ ] Export final `.mp4` with burned-in subtitles.
+- [x] Export final `.mp4` with burned-in subtitles.
 - [x] Handle FFmpeg errors and logs.
 
 ### Phase 4: Backend Endpoint
@@ -823,14 +823,14 @@ backend/
 ### Phase 5: SwiftUI Integration
 
 - [ ] Add bundled tool installer for `ffmpeg` and `ffprobe`.
-- [ ] Add central Swift `FFmpegRunner`.
-- [ ] Add FFmpeg diagnostics screen or developer diagnostic log.
+- [x] Add central Swift `FFmpegRunner`.
+- [x] Add FFmpeg diagnostics screen or developer diagnostic log.
 - [x] Add video picker.
 - [ ] Add subtitle style controls.
 - [ ] Add timing mode picker.
 - [x] Add export button.
-- [ ] Display progress messages.
-- [ ] Reveal output in Finder.
+- [x] Display progress messages.
+- [x] Reveal output in Finder.
 
 ### Phase 6: Accurate Alignment
 

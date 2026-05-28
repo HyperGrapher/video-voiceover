@@ -295,6 +295,7 @@ struct VideoEditorView: View {
     @StateObject private var model = VideoEditorModel()
     @State private var isShowingNarration = false
     @State private var renderMessage = ""
+    @State private var isRendering = false
     private let playbackTimer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
 
     private var activeNarration: ProjectNarration? {
@@ -359,10 +360,10 @@ struct VideoEditorView: View {
             .buttonStyle(.bordered)
 
             Button(action: renderVideoWithSubtitles) {
-                Label("Render", systemImage: "square.and.arrow.up")
+                Label(isRendering ? "Rendering" : "Render", systemImage: isRendering ? "hourglass" : "square.and.arrow.up")
             }
             .buttonStyle(.bordered)
-            .disabled(project.videoURL == nil || project.narrations.isEmpty)
+            .disabled(isRendering || project.videoURL == nil || project.narrations.isEmpty)
             .help(renderButtonHelp)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -527,17 +528,51 @@ struct VideoEditorView: View {
     }
 
     private func renderVideoWithSubtitles() {
-        guard project.videoURL != nil else {
+        guard let videoURL = project.videoURL else {
             renderMessage = "Import a video before rendering"
             return
         }
 
-        guard !project.narrations.isEmpty else {
+        guard let narration = activeNarration else {
             renderMessage = "Generate and place narration before rendering"
             return
         }
 
-        renderMessage = "Render pipeline UI is ready; FFmpeg export wiring is next"
+        guard let outputURL = chooseRenderOutputURL() else { return }
+
+        isRendering = true
+        renderMessage = "Rendering video..."
+
+        Task {
+            do {
+                let result = try await SwiftFFmpegRunner.exportVideoWithSubtitles(VideoExportRequest(
+                    videoURL: videoURL,
+                    narration: narration,
+                    outputURL: outputURL
+                ))
+
+                await MainActor.run {
+                    isRendering = false
+                    renderMessage = "Exported \(result.outputURL.lastPathComponent)"
+                    NSWorkspace.shared.activateFileViewerSelecting([result.outputURL])
+                }
+            } catch {
+                await MainActor.run {
+                    isRendering = false
+                    renderMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func chooseRenderOutputURL() -> URL? {
+        let panel = NSSavePanel()
+        panel.title = "Export Video"
+        panel.nameFieldStringValue = "\(project.name)-subtitled.mp4"
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.allowedContentTypes = [.mpeg4Movie]
+        return panel.runModal() == .OK ? panel.url : nil
     }
 }
 
