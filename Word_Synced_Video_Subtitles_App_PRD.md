@@ -840,6 +840,8 @@ backend/
 - [ ] Add accurate alignment mode.
 - [ ] Compare accuracy vs approximate mode.
 
+Note: Whisper/`tiny.en` forced alignment was prototyped in source but is not an active packaging route because the model/dependency footprint exceeds the app's sub-100 MB package budget. Keep Smart timing as the production path until a smaller offline aligner is chosen.
+
 ### Phase 7: Optional Enhancements
 
 - [ ] Add original audio mixing mode.

@@ -328,7 +328,10 @@ struct VideoEditorView: View {
         .foregroundStyle(.white)
         .background(Color(red: 0.105, green: 0.105, blue: 0.112))
         .sheet(isPresented: $isShowingNarration) {
-            SpeechNarrationView(onPlaceRecording: placeNarrationIntoTrack)
+            SpeechNarrationView(
+                onPlaceRecording: placeNarrationIntoTrack,
+                shouldAlignWords: project.subtitleStyle.timingMode == .forced
+            )
                 .environmentObject(backend)
         }
         .onAppear {
@@ -350,30 +353,7 @@ struct VideoEditorView: View {
     }
 
     private var editorHeader: some View {
-        HStack(spacing: 12) {
-            Button(action: onCloseProject) {
-                Label("Projects", systemImage: "chevron.left")
-            }
-            .buttonStyle(.borderless)
-            .foregroundStyle(.white.opacity(0.82))
-
-            Button(action: model.importVideo) {
-                Label("Import Video", systemImage: "plus")
-            }
-            .buttonStyle(.borderedProminent)
-
-            Button(action: { isShowingNarration = true }) {
-                Label("Add Narration", systemImage: "waveform.and.mic")
-            }
-            .buttonStyle(.bordered)
-
-            Button(action: renderVideoWithSubtitles) {
-                Label(isRendering ? "Rendering" : "Render", systemImage: isRendering ? "hourglass" : "square.and.arrow.up")
-            }
-            .buttonStyle(.bordered)
-            .disabled(isRendering || project.videoURL == nil || project.narrations.isEmpty)
-            .help(renderButtonHelp)
-
+        VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(project.name)
                     .font(.headline)
@@ -384,11 +364,38 @@ struct VideoEditorView: View {
                     .lineLimit(1)
             }
 
-            Spacer()
+            HStack(spacing: 10) {
+                Button(action: onCloseProject) {
+                    Label("Projects", systemImage: "chevron.left")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.white.opacity(0.82))
+
+                Button(action: model.importVideo) {
+                    Label("Import Video", systemImage: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button(action: { isShowingNarration = true }) {
+                    Label("Add Narration", systemImage: "waveform.and.mic")
+                }
+                .buttonStyle(.bordered)
+
+                Button(action: renderVideoWithSubtitles) {
+                    Label(isRendering ? "Rendering" : "Render", systemImage: isRendering ? "hourglass" : "square.and.arrow.up")
+                }
+                .buttonStyle(.bordered)
+                .disabled(isRendering || project.videoURL == nil || project.narrations.isEmpty)
+                .help(renderButtonHelp)
+
+                Spacer(minLength: 0)
+            }
+            .controlSize(.small)
         }
         .padding(.leading, 18)
         .padding(.trailing, 18)
-        .padding(.vertical, 12)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
         .background(Color(red: 0.14, green: 0.13, blue: 0.14))
     }
 
@@ -613,8 +620,7 @@ struct SubtitlePreviewOverlay: View {
 
     private var activeGroup: [ExportTimedWord] {
         PreviewTimingBuilder.activeGroup(
-            for: narration.transcript,
-            duration: narration.duration,
+            for: narration,
             currentTime: currentTime,
             style: style
         )
@@ -663,15 +669,13 @@ struct SubtitlePreviewOverlay: View {
 
 enum PreviewTimingBuilder {
     static func activeGroup(
-        for transcript: String,
-        duration: Double,
+        for narration: ProjectNarration,
         currentTime: Double,
         style: SubtitleStyleSettings
     ) -> [ExportTimedWord] {
-        guard duration > 0 else { return [] }
-        let words = ExportTimingBuilder.approximateTimings(
-            for: transcript,
-            duration: duration,
+        guard narration.duration > 0 else { return [] }
+        let words = ExportTimingBuilder.wordTimings(
+            for: narration,
             mode: style.timingMode
         )
         guard let activeWord = words.first(where: { currentTime >= $0.start && currentTime <= $0.end }) else {

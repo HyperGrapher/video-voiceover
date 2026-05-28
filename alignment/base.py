@@ -17,6 +17,5 @@ class TimedWord:
 
 
 class WordAligner(Protocol):
-    def align(self, transcript: str, audio_duration: float) -> list[TimedWord]:
+    def align(self, transcript: str, audio_duration: float, audio_path: str | None = None) -> list[TimedWord]:
         """Return word-level timings for transcript over audio_duration seconds."""
-

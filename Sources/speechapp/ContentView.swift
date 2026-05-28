@@ -105,6 +105,12 @@ struct SavedRecording: Identifiable, Hashable {
     var title: String { url.deletingPathExtension().lastPathComponent }
 }
 
+struct AlignmentResponse: Decodable {
+    let mode: String?
+    let warning: String?
+    let words: [ExportTimedWord]
+}
+
 enum OperationStatus {
     case ready
     case busy
@@ -198,6 +204,7 @@ struct SubtitleStyleSettings: Codable, Hashable {
 enum SubtitleTimingMode: String, Codable, CaseIterable, Identifiable {
     case simple
     case punctuationAware
+    case forced
 
     var id: String { rawValue }
 
@@ -207,6 +214,8 @@ enum SubtitleTimingMode: String, Codable, CaseIterable, Identifiable {
             "Simple"
         case .punctuationAware:
             "Smart"
+        case .forced:
+            "Forced"
         }
     }
 }
@@ -218,14 +227,37 @@ struct ProjectNarration: Codable, Identifiable, Hashable {
     var voice: String
     var createdAt: Date
     var duration: Double
+    var wordTimings: [ExportTimedWord]
 
-    init(url: URL, transcript: String, voice: String, duration: Double) {
+    init(url: URL, transcript: String, voice: String, duration: Double, wordTimings: [ExportTimedWord] = []) {
         self.id = UUID()
         self.url = url
         self.transcript = transcript
         self.voice = voice
         self.createdAt = Date()
         self.duration = duration
+        self.wordTimings = wordTimings
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case url
+        case transcript
+        case voice
+        case createdAt
+        case duration
+        case wordTimings
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.url = try container.decode(URL.self, forKey: .url)
+        self.transcript = try container.decode(String.self, forKey: .transcript)
+        self.voice = try container.decode(String.self, forKey: .voice)
+        self.createdAt = try container.decode(Date.self, forKey: .createdAt)
+        self.duration = try container.decode(Double.self, forKey: .duration)
+        self.wordTimings = try container.decodeIfPresent([ExportTimedWord].self, forKey: .wordTimings) ?? []
     }
 }
 
@@ -554,6 +586,7 @@ struct LaunchButtonStyle: ButtonStyle {
 struct SpeechNarrationView: View {
     @EnvironmentObject var backend: BackendProcessManager
     var onPlaceRecording: ((ProjectNarration) -> Void)?
+    var shouldAlignWords = false
 
     @State private var textInput = "Hello! I am now streaming audio dynamically chunk by chunk."
     @State private var statusMessage = ""
@@ -973,7 +1006,7 @@ struct SpeechNarrationView: View {
 
             let fileURL = try saveGeneratedAudio(data)
             loadSavedRecordings()
-            placeRecordingIfNeeded(fileURL, transcript: transcript, voice: voice, placeIntoTrack: placeIntoTrack)
+            await placeRecordingIfNeeded(fileURL, transcript: transcript, voice: voice, placeIntoTrack: placeIntoTrack)
             statusMessage = placeIntoTrack ? "Placed \(fileURL.lastPathComponent) into the audio track" : "Saved \(fileURL.lastPathComponent)"
             statusKind = .ready
         } catch is CancellationError {
@@ -1020,21 +1053,87 @@ struct SpeechNarrationView: View {
 
         let fileURL = try savePCMAsM4A(pcmData)
         loadSavedRecordings()
-        placeRecordingIfNeeded(fileURL, transcript: transcript, voice: voice, placeIntoTrack: placeIntoTrack)
+        await placeRecordingIfNeeded(fileURL, transcript: transcript, voice: voice, placeIntoTrack: placeIntoTrack)
         statusMessage = placeIntoTrack ? "Placed \(fileURL.lastPathComponent) into the audio track" : "Saved \(fileURL.lastPathComponent)"
         statusKind = .ready
     }
 
-    private func placeRecordingIfNeeded(_ fileURL: URL, transcript: String, voice: String, placeIntoTrack: Bool) {
+    private func placeRecordingIfNeeded(_ fileURL: URL, transcript: String, voice: String, placeIntoTrack: Bool) async {
         guard placeIntoTrack else { return }
 
         let duration = audioDuration(for: fileURL) ?? 0
+        let alignment = shouldAlignWords
+            ? await alignWordsIfAvailable(audioURL: fileURL, transcript: transcript, duration: duration)
+            : (words: [], warning: nil)
         onPlaceRecording?(ProjectNarration(
             url: fileURL,
             transcript: transcript,
             voice: voice,
-            duration: duration
+            duration: duration,
+            wordTimings: alignment.words
         ))
+
+        if let warning = alignment.warning {
+            statusMessage = "Placed narration; forced alignment unavailable, using Smart timing. \(warning)"
+        }
+    }
+
+    private func alignWordsIfAvailable(audioURL: URL, transcript: String, duration: Double) async -> (words: [ExportTimedWord], warning: String?) {
+        guard duration > 0, let url = URL(string: "http://localhost:8000/align/words") else {
+            return ([], "Missing audio duration")
+        }
+
+        do {
+            let boundary = "Boundary-\(UUID().uuidString)"
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try makeAlignmentMultipartBody(
+                boundary: boundary,
+                audioURL: audioURL,
+                transcript: transcript,
+                duration: duration
+            )
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                return ([], "Backend alignment endpoint is not available.")
+            }
+
+            let alignment = try JSONDecoder().decode(AlignmentResponse.self, from: data)
+            if alignment.mode == "forced" {
+                return (alignment.words, nil)
+            }
+
+            return ([], alignment.warning ?? "Forced aligner returned approximate timing.")
+        } catch {
+            return ([], error.localizedDescription)
+        }
+    }
+
+    private func makeAlignmentMultipartBody(boundary: String, audioURL: URL, transcript: String, duration: Double) throws -> Data {
+        var body = Data()
+
+        func append(_ string: String) {
+            body.append(Data(string.utf8))
+        }
+
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"transcript\"\r\n\r\n")
+        append("\(transcript)\r\n")
+
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"duration\"\r\n\r\n")
+        append("\(duration)\r\n")
+
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"audio\"; filename=\"\(audioURL.lastPathComponent)\"\r\n")
+        append("Content-Type: audio/mp4\r\n\r\n")
+        body.append(try Data(contentsOf: audioURL))
+        append("\r\n")
+        append("--\(boundary)--\r\n")
+
+        return body
     }
 
     private func makeRequestBody() -> Data? {

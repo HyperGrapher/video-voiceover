@@ -26,12 +26,25 @@ enum ExportTimingBuilder {
         sampleRate: Int = 24_000
     ) -> WordsDocument {
         let duration = max(narration.duration, 0)
-        let words = approximateTimings(for: narration.transcript, duration: duration, mode: timingMode)
+        let words = wordTimings(for: narration, mode: timingMode)
         return WordsDocument(
             text: narration.transcript,
             sampleRate: sampleRate,
             duration: duration,
             words: words
+        )
+    }
+
+    static func wordTimings(for narration: ProjectNarration, mode: SubtitleTimingMode) -> [ExportTimedWord] {
+        if mode == .forced, !narration.wordTimings.isEmpty {
+            return narration.wordTimings
+        }
+
+        let fallbackMode: SubtitleTimingMode = mode == .simple ? .simple : .punctuationAware
+        return approximateTimings(
+            for: narration.transcript,
+            duration: max(narration.duration, 0),
+            mode: fallbackMode
         )
     }
 
@@ -43,10 +56,11 @@ enum ExportTimingBuilder {
         let tokens = tokenize(transcript)
         guard !tokens.isEmpty, duration > 0 else { return [] }
 
-        let pauseWeights = tokens.map { mode == .punctuationAware ? pauseWeight(after: $0) : 0 }
+        let useSmartTiming = mode == .punctuationAware || mode == .forced
+        let pauseWeights = tokens.map { useSmartTiming ? pauseWeight(after: $0) : 0 }
         let reservedPause = min(duration * 0.28, pauseWeights.reduce(0, +) * 0.08)
         let spokenDuration = max(duration - reservedPause, duration * 0.72)
-        let weights = tokens.map { mode == .punctuationAware ? spokenWeight(for: $0) : Double(max(1, $0.count)) }
+        let weights = tokens.map { useSmartTiming ? spokenWeight(for: $0) : Double(max(1, $0.count)) }
         let totalWeight = max(weights.reduce(0, +), 1)
         var current = 0.0
         var result: [ExportTimedWord] = []
