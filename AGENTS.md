@@ -42,4 +42,5 @@ This is a native macOS SwiftUI app for private, offline voiceover and video subt
 - Launch screen: create a new `.speechproj`, list previous projects, and open an editor-style project workspace.
 - Narration modal: live Kokoro streaming, cancel, save, play/delete saved recordings.
 - Video editor screen: import/drop video, preview with `AVPlayerView`, transport controls, three placeholder tracks, red draggable/clickable playhead for seeking.
-- Next likely work: add project media references for generated narration, then implement PRD-driven word alignment, animated subtitle styling, and FFmpeg burn-in using local FFmpeg without packaging it yet.
+- PRD section `24. Implementation Tasks` is the implementation handoff checklist. Keep it updated as work lands.
+- Phase 1 ASS subtitle rendering and most of Phase 2 approximate timing now exist as source helpers: `subtitles/colors.py`, `subtitles/grouping.py`, `subtitles/ass_renderer.py`, `alignment/base.py`, `alignment/approximate.py`, `Scripts/generate_mock_ass.py`, and `Scripts/generate_mock_words_json.py`. Next likely work: manually render `BuildArtifacts/mock_word_subtitles.ass` with FFmpeg, test approximate timing with short/medium/long text, then begin Phase 3 FFmpeg runner/diagnostics.

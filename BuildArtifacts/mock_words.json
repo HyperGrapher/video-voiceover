@@ -1,0 +1,70 @@
+{
+  "text": "Offline voiceover with word synced subtitles is coming together.",
+  "sampleRate": 24000,
+  "duration": 4.2,
+  "words": [
+    {
+      "index": 0,
+      "word": "Offline",
+      "start": 0.0,
+      "end": 0.5345,
+      "confidence": 0.4
+    },
+    {
+      "index": 1,
+      "word": "voiceover",
+      "start": 0.5345,
+      "end": 1.2218,
+      "confidence": 0.4
+    },
+    {
+      "index": 2,
+      "word": "with",
+      "start": 1.2218,
+      "end": 1.5273,
+      "confidence": 0.4
+    },
+    {
+      "index": 3,
+      "word": "word",
+      "start": 1.5273,
+      "end": 1.8327,
+      "confidence": 0.4
+    },
+    {
+      "index": 4,
+      "word": "synced",
+      "start": 1.8327,
+      "end": 2.2909,
+      "confidence": 0.4
+    },
+    {
+      "index": 5,
+      "word": "subtitles",
+      "start": 2.2909,
+      "end": 2.9782,
+      "confidence": 0.4
+    },
+    {
+      "index": 6,
+      "word": "is",
+      "start": 2.9782,
+      "end": 3.1309,
+      "confidence": 0.4
+    },
+    {
+      "index": 7,
+      "word": "coming",
+      "start": 3.1309,
+      "end": 3.5891,
+      "confidence": 0.4
+    },
+    {
+      "index": 8,
+      "word": "together",
+      "start": 3.5891,
+      "end": 4.2,
+      "confidence": 0.4
+    }
+  ]
+}

@@ -786,18 +786,18 @@ backend/
 
 ### Phase 1: ASS Subtitle Rendering
 
-- [ ] Add `subtitles/colors.py` with `hex_to_ass_color`.
-- [ ] Add `subtitles/grouping.py` with word grouping logic.
-- [ ] Add `subtitles/ass_renderer.py`.
-- [ ] Generate valid `.ass` file from mock word timings.
+- [x] Add `subtitles/colors.py` with `hex_to_ass_color`.
+- [x] Add `subtitles/grouping.py` with word grouping logic.
+- [x] Add `subtitles/ass_renderer.py`.
+- [x] Generate valid `.ass` file from mock word timings.
 - [ ] Test `.ass` rendering manually with FFmpeg.
 
 ### Phase 2: Approximate Word Timing
 
-- [ ] Add word tokenizer.
-- [ ] Add approximate word timing generation.
-- [ ] Generate `words.json`.
-- [ ] Verify total word timing duration matches generated audio duration.
+- [x] Add word tokenizer.
+- [x] Add approximate word timing generation.
+- [x] Generate `words.json`.
+- [x] Verify total word timing duration matches generated audio duration.
 - [ ] Test with short, medium, and long text.
 
 ### Phase 3: FFmpeg Export
@@ -1271,4 +1271,3 @@ Export final.mp4
 Do not start with forced alignment unless the approximate pipeline is already working.
 
 The key is to first prove the full video export path end-to-end. Once the pipeline works, replace approximate timing with accurate forced alignment behind the same `WordAligner` interface.
-

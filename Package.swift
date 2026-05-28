@@ -19,7 +19,9 @@ let package = Package(
             path: "Sources/speechapp",
             exclude: [
                 "Info.plist",
-                "Resources/tts_backend.md"
+                "Resources/tts_backend.md",
+                "Resources/ffmpeg",
+                "Resources/ffprobe"
             ],
             resources: [
                 // Embed the compiled python executable safely inside the target resources
