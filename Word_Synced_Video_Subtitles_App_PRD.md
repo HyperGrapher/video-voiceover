@@ -802,13 +802,13 @@ backend/
 
 ### Phase 3: FFmpeg Export
 
-- [ ] Add FFmpeg availability check.
-- [ ] Add FFmpeg/libass diagnostic check.
-- [ ] Add `video/ffmpeg_runner.py`.
-- [ ] Add replace-audio export command.
-- [ ] Add safe temp export directory creation.
+- [x] Add FFmpeg availability check.
+- [x] Add FFmpeg/libass diagnostic check.
+- [x] Add `video/ffmpeg_runner.py`.
+- [x] Add replace-audio export command.
+- [x] Add safe temp export directory creation.
 - [ ] Export final `.mp4` with burned-in subtitles.
-- [ ] Handle FFmpeg errors and logs.
+- [x] Handle FFmpeg errors and logs.
 
 ### Phase 4: Backend Endpoint
 
@@ -825,17 +825,17 @@ backend/
 - [ ] Add bundled tool installer for `ffmpeg` and `ffprobe`.
 - [ ] Add central Swift `FFmpegRunner`.
 - [ ] Add FFmpeg diagnostics screen or developer diagnostic log.
-- [ ] Add video picker.
+- [x] Add video picker.
 - [ ] Add subtitle style controls.
 - [ ] Add timing mode picker.
-- [ ] Add export button.
+- [x] Add export button.
 - [ ] Display progress messages.
 - [ ] Reveal output in Finder.
 
 ### Phase 6: Accurate Alignment
 
-- [ ] Create `WordAligner` interface.
-- [ ] Keep approximate aligner as fallback.
+- [x] Create `WordAligner` interface.
+- [x] Keep approximate aligner as fallback.
 - [ ] Research and integrate offline forced alignment backend.
 - [ ] Add accurate alignment mode.
 - [ ] Compare accuracy vs approximate mode.
@@ -845,7 +845,7 @@ backend/
 - [ ] Add original audio mixing mode.
 - [ ] Add active-word-only bold mode.
 - [ ] Add more subtitle presets.
-- [ ] Add live SwiftUI karaoke preview.
+- [x] Add live SwiftUI karaoke preview.
 - [ ] Add export of `.ass`, `.vtt`, and `words.json` as optional artifacts.
 
 ---

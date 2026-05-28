@@ -239,7 +239,12 @@ struct VideoEditorView: View {
 
     @StateObject private var model = VideoEditorModel()
     @State private var isShowingNarration = false
+    @State private var renderMessage = ""
     private let playbackTimer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
+
+    private var activeNarration: ProjectNarration? {
+        project.narrations.first
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -253,13 +258,13 @@ struct VideoEditorView: View {
 
             transportBar
 
-            TimelineViewShell(model: model)
+            TimelineViewShell(model: model, project: project)
                 .frame(height: 260)
         }
         .foregroundStyle(.white)
         .background(Color(red: 0.105, green: 0.105, blue: 0.112))
         .sheet(isPresented: $isShowingNarration) {
-            SpeechNarrationView()
+            SpeechNarrationView(onPlaceRecording: placeNarrationIntoTrack)
                 .environmentObject(backend)
         }
         .onAppear {
@@ -294,11 +299,18 @@ struct VideoEditorView: View {
             }
             .buttonStyle(.bordered)
 
+            Button(action: renderVideoWithSubtitles) {
+                Label("Render", systemImage: "square.and.arrow.up")
+            }
+            .buttonStyle(.bordered)
+            .disabled(project.videoURL == nil || project.narrations.isEmpty)
+            .help(renderButtonHelp)
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(project.name)
                     .font(.headline)
                     .lineLimit(1)
-                Text("\(projectURL.lastPathComponent) - \(model.statusMessage)")
+                Text(editorStatusLine)
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.58))
                     .lineLimit(1)
@@ -360,6 +372,14 @@ struct VideoEditorView: View {
                     } else {
                         PlayerPreviewView(player: model.player)
                             .background(Color.black)
+
+                        if let activeNarration {
+                            SubtitlePreviewOverlay(
+                                narration: activeNarration,
+                                currentTime: model.currentTime
+                            )
+                            .allowsHitTesting(false)
+                        }
                     }
                 }
                 .frame(width: previewWidth, height: previewHeight)
@@ -419,6 +439,46 @@ struct VideoEditorView: View {
         .padding(.vertical, 10)
         .background(Color(red: 0.095, green: 0.095, blue: 0.10))
     }
+
+    private var editorStatusLine: String {
+        let base = "\(projectURL.lastPathComponent) - \(model.statusMessage)"
+        guard !renderMessage.isEmpty else { return base }
+        return "\(base) - \(renderMessage)"
+    }
+
+    private var renderButtonHelp: String {
+        if project.videoURL == nil {
+            return "Import a video before rendering."
+        }
+        if project.narrations.isEmpty {
+            return "Generate and place narration before rendering."
+        }
+        return "Export video with generated narration and word-synced subtitles."
+    }
+
+    private func placeNarrationIntoTrack(_ narration: ProjectNarration) {
+        if !project.audioURLs.contains(narration.url) {
+            project.audioURLs.append(narration.url)
+        }
+
+        project.narrations.append(narration)
+        renderMessage = "Narration placed into audio/subtitle tracks"
+        isShowingNarration = false
+    }
+
+    private func renderVideoWithSubtitles() {
+        guard project.videoURL != nil else {
+            renderMessage = "Import a video before rendering"
+            return
+        }
+
+        guard !project.narrations.isEmpty else {
+            renderMessage = "Generate and place narration before rendering"
+            return
+        }
+
+        renderMessage = "Render pipeline UI is ready; FFmpeg export wiring is next"
+    }
 }
 
 struct PlayerPreviewView: NSViewRepresentable {
@@ -439,8 +499,117 @@ struct PlayerPreviewView: NSViewRepresentable {
     }
 }
 
+struct SubtitlePreviewOverlay: View {
+    let narration: ProjectNarration
+    let currentTime: Double
+
+    private var activeGroup: [PreviewTimedWord] {
+        PreviewTimingBuilder.activeGroup(
+            for: narration.transcript,
+            duration: narration.duration,
+            currentTime: currentTime
+        )
+    }
+
+    private var activeWordID: Int? {
+        activeGroup.first { currentTime >= $0.start && currentTime <= $0.end }?.index
+    }
+
+    var body: some View {
+        VStack {
+            Spacer()
+
+            if !activeGroup.isEmpty {
+                HStack(spacing: 7) {
+                    ForEach(activeGroup) { word in
+                        Text(word.word)
+                            .font(.system(size: 34, weight: word.index == activeWordID ? .heavy : .bold, design: .rounded))
+                            .foregroundStyle(word.index == activeWordID ? Color(red: 1.0, green: 0.86, blue: 0.18) : .white)
+                            .shadow(color: .black, radius: 2, x: 0, y: 1)
+                    }
+                }
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .minimumScaleFactor(0.55)
+                .padding(.horizontal, 22)
+                .padding(.vertical, 10)
+                .background(.black.opacity(0.28), in: RoundedRectangle(cornerRadius: 8))
+                .padding(.bottom, 34)
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.12), value: activeGroup)
+    }
+}
+
+struct PreviewTimedWord: Identifiable, Hashable {
+    let index: Int
+    let word: String
+    let start: Double
+    let end: Double
+
+    var id: Int { index }
+}
+
+enum PreviewTimingBuilder {
+    static func activeGroup(for transcript: String, duration: Double, currentTime: Double) -> [PreviewTimedWord] {
+        guard duration > 0 else { return [] }
+        let words = approximateTimings(for: transcript, duration: duration)
+        guard let activeIndex = words.firstIndex(where: { currentTime >= $0.start && currentTime <= $0.end }) else {
+            return []
+        }
+
+        let groupStart = max(0, activeIndex - activeIndex % 6)
+        let groupEnd = min(words.count, groupStart + 6)
+        return Array(words[groupStart..<groupEnd])
+    }
+
+    private static func approximateTimings(for transcript: String, duration: Double) -> [PreviewTimedWord] {
+        let tokens = tokenize(transcript)
+        guard !tokens.isEmpty else { return [] }
+
+        let weights = tokens.map { max(1, $0.count) }
+        let totalWeight = max(weights.reduce(0, +), 1)
+        var current = 0.0
+        var result: [PreviewTimedWord] = []
+
+        for tokenIndex in tokens.indices {
+            let end: Double
+            if tokenIndex == tokens.count - 1 {
+                end = duration
+            } else {
+                end = min(duration, current + duration * Double(weights[tokenIndex]) / Double(totalWeight))
+            }
+
+            result.append(PreviewTimedWord(
+                index: tokenIndex,
+                word: tokens[tokenIndex],
+                start: current,
+                end: end
+            ))
+            current = end
+        }
+
+        return result
+    }
+
+    private static func tokenize(_ transcript: String) -> [String] {
+        transcript
+            .components(separatedBy: CharacterSet.whitespacesAndNewlines)
+            .flatMap { chunk in
+                chunk
+                    .split { character in
+                        character.isPunctuation && character != "'" && character != "-"
+                    }
+                    .map(String.init)
+            }
+            .filter { !$0.isEmpty }
+    }
+}
+
 struct TimelineViewShell: View {
     @ObservedObject var model: VideoEditorModel
+    let project: SpeechAppProject
 
     private let labelColumnWidth: CGFloat = 84
     private let rulerHeight: CGFloat = 34
@@ -553,12 +722,12 @@ struct TimelineViewShell: View {
                 Rectangle()
                     .fill(index == 0 ? Color(red: 0.10, green: 0.15, blue: 0.22) : Color(red: 0.105, green: 0.105, blue: 0.11))
 
-                if model.selectedVideoURL != nil {
+                if shouldShowClip(for: index) {
                     RoundedRectangle(cornerRadius: 5)
                         .fill(track.2.opacity(index == 0 ? 0.90 : 0.56))
-                        .frame(width: timelineWidth, height: 42)
+                        .frame(width: clipWidth(for: index, timelineWidth: timelineWidth), height: 42)
                         .overlay(alignment: .leading) {
-                            Text(index == 0 ? model.selectedVideoURL?.lastPathComponent ?? "Clip" : track.0)
+                            Text(trackTitle(for: index))
                                 .font(.caption)
                                 .foregroundStyle(.white.opacity(0.85))
                                 .lineLimit(1)
@@ -573,6 +742,39 @@ struct TimelineViewShell: View {
                     .frame(height: 1)
             }
             .frame(width: timelineWidth)
+        }
+    }
+
+    private func shouldShowClip(for trackIndex: Int) -> Bool {
+        switch trackIndex {
+        case 0:
+            return model.selectedVideoURL != nil
+        case 1, 2:
+            return !project.narrations.isEmpty
+        default:
+            return false
+        }
+    }
+
+    private func clipWidth(for trackIndex: Int, timelineWidth: CGFloat) -> CGFloat {
+        guard trackIndex != 0, let narration = project.narrations.first, model.duration > 0 else {
+            return timelineWidth
+        }
+
+        let ratio = min(max(narration.duration / model.duration, 0.04), 1.0)
+        return max(52, timelineWidth * CGFloat(ratio))
+    }
+
+    private func trackTitle(for trackIndex: Int) -> String {
+        switch trackIndex {
+        case 0:
+            return model.selectedVideoURL?.lastPathComponent ?? "Video"
+        case 1:
+            return project.narrations.first?.url.lastPathComponent ?? "Narration"
+        case 2:
+            return project.narrations.first?.transcript ?? "Word subtitles"
+        default:
+            return "Clip"
         }
     }
 

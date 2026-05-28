@@ -126,6 +126,7 @@ struct SpeechAppProject: Codable, Identifiable, Hashable {
     var updatedAt: Date
     var videoURL: URL?
     var audioURLs: [URL]
+    var narrations: [ProjectNarration]
 
     init(name: String) {
         self.id = UUID()
@@ -134,6 +135,46 @@ struct SpeechAppProject: Codable, Identifiable, Hashable {
         self.updatedAt = Date()
         self.videoURL = nil
         self.audioURLs = []
+        self.narrations = []
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case createdAt
+        case updatedAt
+        case videoURL
+        case audioURLs
+        case narrations
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.name = try container.decode(String.self, forKey: .name)
+        self.createdAt = try container.decode(Date.self, forKey: .createdAt)
+        self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        self.videoURL = try container.decodeIfPresent(URL.self, forKey: .videoURL)
+        self.audioURLs = try container.decodeIfPresent([URL].self, forKey: .audioURLs) ?? []
+        self.narrations = try container.decodeIfPresent([ProjectNarration].self, forKey: .narrations) ?? []
+    }
+}
+
+struct ProjectNarration: Codable, Identifiable, Hashable {
+    var id: UUID
+    var url: URL
+    var transcript: String
+    var voice: String
+    var createdAt: Date
+    var duration: Double
+
+    init(url: URL, transcript: String, voice: String, duration: Double) {
+        self.id = UUID()
+        self.url = url
+        self.transcript = transcript
+        self.voice = voice
+        self.createdAt = Date()
+        self.duration = duration
     }
 }
 
@@ -461,6 +502,7 @@ struct LaunchButtonStyle: ButtonStyle {
 
 struct SpeechNarrationView: View {
     @EnvironmentObject var backend: BackendProcessManager
+    var onPlaceRecording: ((ProjectNarration) -> Void)?
 
     @State private var textInput = "Hello! I am now streaming audio dynamically chunk by chunk."
     @State private var statusMessage = ""
@@ -470,6 +512,7 @@ struct SpeechNarrationView: View {
     @State private var fileTask: Task<Void, Never>?
     @State private var isStreaming = false
     @State private var isGeneratingFile = false
+    @State private var isGeneratingTrackPlacement = false
     @State private var streamPlayer: PCMStreamPlayer?
     @State private var savedRecordings: [SavedRecording] = []
     @State private var filePlayer: AVAudioPlayer?
@@ -479,7 +522,7 @@ struct SpeechNarrationView: View {
     private let availableVoices = ["af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky", "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael", "am_onyx", "am_puck", "am_santa", "bf_alice", "bf_emma", "bf_isabella", "bf_lily", "bm_daniel", "bm_fable", "bm_george", "bm_lewis", "ef_dora", "em_alex", "em_santa", "ff_siwis", "hf_alpha", "hf_beta", "hm_omega", "hm_psi", "if_sara", "im_nicola", "jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo", "pf_dora", "pm_alex", "pm_santa", "zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi", "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang"]
 
     private var isBusy: Bool {
-        isStreaming || isGeneratingFile
+        isStreaming || isGeneratingFile || isGeneratingTrackPlacement
     }
 
     var body: some View {
@@ -596,6 +639,17 @@ struct SpeechNarrationView: View {
                 }
             }
             .disabled(isBusy || textInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+            if onPlaceRecording != nil {
+                Button(action: startTrackPlacementGeneration) {
+                    if isGeneratingTrackPlacement {
+                        Label("Placing", systemImage: "hourglass")
+                    } else {
+                        Label("Generate and Place Into Track", systemImage: "text.line.first.and.arrowtriangle.forward")
+                    }
+                }
+                .disabled(isBusy || textInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
 
             Spacer()
 
@@ -728,7 +782,14 @@ struct SpeechNarrationView: View {
     private func startFileGeneration() {
         fileTask?.cancel()
         fileTask = Task {
-            await generateSavedSpeech()
+            await generateSavedSpeech(placeIntoTrack: false)
+        }
+    }
+
+    private func startTrackPlacementGeneration() {
+        fileTask?.cancel()
+        fileTask = Task {
+            await generateSavedSpeech(placeIntoTrack: true)
         }
     }
 
@@ -822,14 +883,22 @@ struct SpeechNarrationView: View {
         }
     }
 
-    private func generateSavedSpeech() async {
-        isGeneratingFile = true
-        statusMessage = "Generating full audio file..."
+    private func generateSavedSpeech(placeIntoTrack: Bool) async {
+        if placeIntoTrack {
+            isGeneratingTrackPlacement = true
+            statusMessage = "Generating and placing narration..."
+        } else {
+            isGeneratingFile = true
+            statusMessage = "Generating full audio file..."
+        }
         statusKind = .busy
+        let transcript = textInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let voice = selectedVoice
 
         defer {
             fileTask = nil
             isGeneratingFile = false
+            isGeneratingTrackPlacement = false
         }
 
         guard let url = URL(string: "http://localhost:8000/tts-file") else { return }
@@ -843,7 +912,7 @@ struct SpeechNarrationView: View {
 
             if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
                 if httpResponse.statusCode == 404 {
-                    try await generateSavedSpeechFromStreamFallback()
+                    try await generateSavedSpeechFromStreamFallback(placeIntoTrack: placeIntoTrack, transcript: transcript, voice: voice)
                 } else {
                     statusMessage = "Server error: \(httpResponse.statusCode)"
                     statusKind = .error
@@ -853,7 +922,8 @@ struct SpeechNarrationView: View {
 
             let fileURL = try saveGeneratedAudio(data)
             loadSavedRecordings()
-            statusMessage = "Saved \(fileURL.lastPathComponent)"
+            placeRecordingIfNeeded(fileURL, transcript: transcript, voice: voice, placeIntoTrack: placeIntoTrack)
+            statusMessage = placeIntoTrack ? "Placed \(fileURL.lastPathComponent) into the audio track" : "Saved \(fileURL.lastPathComponent)"
             statusKind = .ready
         } catch is CancellationError {
             statusMessage = "File generation canceled"
@@ -864,7 +934,7 @@ struct SpeechNarrationView: View {
         }
     }
 
-    private func generateSavedSpeechFromStreamFallback() async throws {
+    private func generateSavedSpeechFromStreamFallback(placeIntoTrack: Bool, transcript: String, voice: String) async throws {
         statusMessage = "Bundled backend needs packaging for /tts-file; saving through stream..."
 
         guard let url = URL(string: "http://localhost:8000/tts") else { return }
@@ -899,8 +969,21 @@ struct SpeechNarrationView: View {
 
         let fileURL = try savePCMAsM4A(pcmData)
         loadSavedRecordings()
-        statusMessage = "Saved \(fileURL.lastPathComponent)"
+        placeRecordingIfNeeded(fileURL, transcript: transcript, voice: voice, placeIntoTrack: placeIntoTrack)
+        statusMessage = placeIntoTrack ? "Placed \(fileURL.lastPathComponent) into the audio track" : "Saved \(fileURL.lastPathComponent)"
         statusKind = .ready
+    }
+
+    private func placeRecordingIfNeeded(_ fileURL: URL, transcript: String, voice: String, placeIntoTrack: Bool) {
+        guard placeIntoTrack else { return }
+
+        let duration = audioDuration(for: fileURL) ?? 0
+        onPlaceRecording?(ProjectNarration(
+            url: fileURL,
+            transcript: transcript,
+            voice: voice,
+            duration: duration
+        ))
     }
 
     private func makeRequestBody() -> Data? {
@@ -1002,6 +1085,13 @@ struct SpeechNarrationView: View {
             try outputFile.write(from: buffer)
             buffer.frameLength = 0
         }
+    }
+
+    private func audioDuration(for url: URL) -> Double? {
+        guard let audioFile = try? AVAudioFile(forReading: url) else { return nil }
+        let sampleRate = audioFile.fileFormat.sampleRate
+        guard sampleRate > 0 else { return nil }
+        return Double(audioFile.length) / sampleRate
     }
 
     private func sanitizedTitlePrefix() -> String {
