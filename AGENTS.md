@@ -2,14 +2,15 @@
 
 ## App Overview
 
-This is a native macOS SwiftUI app evolving from offline Kokoro text-to-speech into a video/audio and subtitle placement, arrangement app for easier social media content creation.
+This is a native macOS SwiftUI app for private, offline voiceover and video subtitle production. The app turns text into natural-sounding AI narration with Kokoro TTS, then will align words, style animated subtitles, and burn finished subtitles into video with local FFmpeg in later milestones.
 
 - The Swift app launches the bundled Python FastAPI backend from `Sources/speechapp/Resources/tts_backend`.
 - `app.py` is source only. Editing it does not update the bundled executable until the user repackages the backend.
 - Live TTS uses raw little-endian 16-bit mono PCM at 24 kHz (`pcm_s16le`) from `/tts`.
 - Swift streams PCM through `AVAudioEngine`/`AVAudioPlayerNode`; do not go back to partial WAV snapshots or one-shot `AVAudioPlayer` for live streaming.
 - Saved speech recordings are AAC `.m4a` for macOS/iOS compatibility; existing `.wav` files should remain visible/playable.
-- Video work is currently an editor shell only: import, preview, transport controls, timeline, and scrubbing. No FFmpeg export, subtitle rendering, or alignment has been implemented yet.
+- The app is now project based. Project files use `.speechproj` JSON and reference imported media paths.
+- Video work is currently an editor shell only: launch/recent-projects flow, create/open project, import, preview, transport controls, timeline, scrubbing, and narration modal. No FFmpeg export, subtitle rendering, or alignment has been implemented yet.
 
 ## Standing Instructions
 
@@ -38,6 +39,7 @@ This is a native macOS SwiftUI app evolving from offline Kokoro text-to-speech i
 
 ## Current Milestones
 
-- TTS screen: live streaming, cancel, save, play/delete saved recordings.
-- Video screen: import/drop video, preview with `AVPlayerView`, transport controls, three placeholder tracks, red draggable/clickable playhead for seeking.
-- Next likely work: stabilize video preview UX, then add PRD-driven subtitle/export pipeline using local FFmpeg without packaging it yet.
+- Launch screen: create a new `.speechproj`, list previous projects, and open an editor-style project workspace.
+- Narration modal: live Kokoro streaming, cancel, save, play/delete saved recordings.
+- Video editor screen: import/drop video, preview with `AVPlayerView`, transport controls, three placeholder tracks, red draggable/clickable playhead for seeking.
+- Next likely work: add project media references for generated narration, then implement PRD-driven word alignment, animated subtitle styling, and FFmpeg burn-in using local FFmpeg without packaging it yet.

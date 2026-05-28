@@ -15,6 +15,7 @@ final class VideoEditorModel: ObservableObject {
 
     let player = AVPlayer()
     private let supportedVideoExtensions = ["mp4", "mov", "m4v", "mkv", "webm"]
+    var onVideoImported: ((URL) -> Void)?
 
     func importVideo() {
         let panel = NSOpenPanel()
@@ -76,6 +77,9 @@ final class VideoEditorModel: ObservableObject {
         do {
             let importedURL = try copyVideoIntoAppStorage(sourceURL)
             await loadVideo(importedURL)
+            if selectedVideoURL == importedURL {
+                onVideoImported?(importedURL)
+            }
         } catch {
             selectedVideoURL = nil
             duration = 0
@@ -112,6 +116,24 @@ final class VideoEditorModel: ObservableObject {
             currentTime = 0
             player.replaceCurrentItem(with: nil)
             statusMessage = "Could not load video: \(error.localizedDescription)"
+        }
+    }
+
+    func loadProjectVideo(_ url: URL?) {
+        guard selectedVideoURL != url else { return }
+
+        guard let url else {
+            selectedVideoURL = nil
+            duration = 0
+            currentTime = 0
+            isPlaying = false
+            player.replaceCurrentItem(with: nil)
+            statusMessage = "Import a video to begin arranging."
+            return
+        }
+
+        Task {
+            await loadVideo(url)
         }
     }
 
@@ -209,9 +231,14 @@ final class VideoEditorModel: ObservableObject {
 }
 
 struct VideoEditorView: View {
-    let onBackToSpeech: () -> Void
+    @EnvironmentObject var backend: BackendProcessManager
+
+    @Binding var project: SpeechAppProject
+    let projectURL: URL
+    let onCloseProject: () -> Void
 
     @StateObject private var model = VideoEditorModel()
+    @State private var isShowingNarration = false
     private let playbackTimer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -231,6 +258,19 @@ struct VideoEditorView: View {
         }
         .foregroundStyle(.white)
         .background(Color(red: 0.105, green: 0.105, blue: 0.112))
+        .sheet(isPresented: $isShowingNarration) {
+            SpeechNarrationView()
+                .environmentObject(backend)
+        }
+        .onAppear {
+            model.onVideoImported = { url in
+                project.videoURL = url
+            }
+            model.loadProjectVideo(project.videoURL)
+        }
+        .onChange(of: project.videoURL) { _, newURL in
+            model.loadProjectVideo(newURL)
+        }
         .onReceive(playbackTimer) { _ in
             model.syncCurrentTimeFromPlayer()
         }
@@ -238,8 +278,8 @@ struct VideoEditorView: View {
 
     private var editorHeader: some View {
         HStack(spacing: 12) {
-            Button(action: onBackToSpeech) {
-                Label("Speech", systemImage: "chevron.left")
+            Button(action: onCloseProject) {
+                Label("Projects", systemImage: "chevron.left")
             }
             .buttonStyle(.borderless)
             .foregroundStyle(.white.opacity(0.82))
@@ -249,11 +289,16 @@ struct VideoEditorView: View {
             }
             .buttonStyle(.borderedProminent)
 
+            Button(action: { isShowingNarration = true }) {
+                Label("Add Narration", systemImage: "waveform.and.mic")
+            }
+            .buttonStyle(.bordered)
+
             VStack(alignment: .leading, spacing: 2) {
-                Text(model.selectedVideoURL?.lastPathComponent ?? "Untitled Video Arrangement")
+                Text(project.name)
                     .font(.headline)
                     .lineLimit(1)
-                Text(model.statusMessage)
+                Text("\(projectURL.lastPathComponent) - \(model.statusMessage)")
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.58))
                     .lineLimit(1)

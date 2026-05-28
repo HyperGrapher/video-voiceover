@@ -1,17 +1,19 @@
-# Project Summary: Offline Kokoro TTS Integration for macOS (Intel)
+# Project Summary: Speech Studio Offline Voiceover And Subtitle App
 
-This document summarizes the development journey, architectural adjustments, technical challenges, and ultimate solutions implemented to build a local, offline Text-to-Speech (TTS) app on an Intel-based Mac.
+This document summarizes the current architecture for a private, offline macOS app that creates Kokoro AI voiceovers for video projects and is evolving toward word-synced animated subtitle burn-in with local FFmpeg.
 
 ---
 
 ## 1. Overview of the Application
-The application is a native macOS desktop utility that provides **100% offline, private text-to-speech synthesis** using the high-quality, open-source **Kokoro-82M** model. 
+The application is a native macOS project-based editor for local voiceover and subtitle production. It turns text into natural-sounding AI narration using **Kokoro-82M**, keeps generated audio private on the Mac, and provides a video editor shell where imported media is referenced from `.speechproj` files.
 
 ### Core Features
-*   **Pure SwiftUI 6 Frontend**: A modern, responsive user interface built using Apple's declarative UI framework, fully compiled under strict Swift 6 data-isolation parameters.
+*   **Project-Based Launch Flow**: The app starts with a compact launch screen for creating `.speechproj` files and reopening previous projects.
+*   **Editor Workspace**: Projects open into a Premiere-style video editor shell with import, preview, transport controls, timeline, and a draggable playhead.
+*   **Narration Modal**: Speech generation now appears inside the editor as an Add Narration sheet instead of a separate top-level mode.
 *   **Low-Latency Async Streaming**: Audio frames are spoken progressively as they generate, reducing the time-to-first-word significantly on older Intel processors.
-*   **Subprocess Lifetime Automation**: The app automatically boots up and tears down a hidden Python background engine within the bundle bundle namespace without requiring terminal orchestration.
-*   **Visual Handshake Tracker**: Displays a loading spinner when launching (*"Starting system infrastructure..."*) and unlocks the full UI automatically only when a successful port verification returns (*"Engine Ready"*).
+*   **Subprocess Lifetime Automation**: The app automatically boots up and tears down a hidden Python background engine within the bundle namespace without requiring terminal orchestration.
+*   **Future Subtitle Pipeline**: Word alignment, animated subtitle styling, and FFmpeg burn-in are planned but not implemented yet.
 
 ---
 
@@ -20,16 +22,17 @@ The application is a native macOS desktop utility that provides **100% offline, 
 Because the machine is an **Intel Mac (2017 MacBook Pro)** running **macOS 15 Sequoia** via **OpenCore Legacy Patcher**, the app follows a local hybrid streaming client-server structure:
 
 ```text
-┌─────────────────────────────────┐   HTTP POST (Chunk Request)    ┌─────────────────────────────────┐
+┌─────────────────────────────────┐   HTTP POST (Text + Voice)      ┌─────────────────────────────────┐
 │     SwiftUI 6 Frontend App      │ ─────────────────────────────> │     Python FastAPI Backend      │
-│ (Asynchronously Streams Audio)  │ <───────────────────────────── │   (Compiles Pure Python Lists)  │
-└─────────────────────────────────┘     Continuous WAV Byte Stream └─────────────────────────────────┘
+│ (Projects, Video, Narration UI) │ <───────────────────────────── │        Kokoro TTS Engine        │
+└─────────────────────────────────┘      Raw 24 kHz PCM Stream      └─────────────────────────────────┘
 ```
 
 1.  **Launch Handshake**: On startup, a shared actor-isolated manager class triggers the internal embedded backend engine binary file. It monitors the network gateway iteratively via standard background async task workers.
-2.  **User Action**: The user selects a voice embedding matrix profile (e.g., `af_heart`), inputs string sentences, and clicks **Stream Text**.
-3.  **Generator Streaming**: The Python engine captures the payload. Instead of accumulating frames via heavy libraries, it converts individual array pieces into native Python float lists (`.tolist()`), structures them into micro-WAV bytes via `soundfile`, and immediately `yield`s them out down a persistent `StreamingResponse` network pipe.
-4.  **Buffer Playback Interception**: Swift captures the incoming response stream using `URLSession.shared.bytes`. The very second the internal buffer hits a predefined threshold size (~1 second of audio data), an `AVAudioPlayer` initialization snapshot plays back instantly while the remaining chunks stream down the background thread concurrently.
+2.  **Project Action**: The user creates or opens a `.speechproj`, imports video into stable app storage, and opens Add Narration from the editor header.
+3.  **Narration Action**: The user selects a voice embedding matrix profile (e.g., `af_heart`), inputs string sentences, and generates local speech.
+4.  **Generator Streaming**: The Python engine captures the payload and streams raw `pcm_s16le` audio bytes through a persistent `StreamingResponse` network pipe.
+5.  **Buffer Playback Interception**: Swift captures the incoming response stream using `URLSession.shared.bytes`, converts little-endian 16-bit PCM to float buffers, and schedules playback through `AVAudioEngine`/`AVAudioPlayerNode`.
 
 ---
 

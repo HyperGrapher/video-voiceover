@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFAudio
 import AppKit
+import UniformTypeIdentifiers
 
 final class PCMStreamPlayer {
     private let engine = AVAudioEngine()
@@ -110,13 +111,6 @@ enum OperationStatus {
     case error
 }
 
-enum AppMode: String, CaseIterable, Identifiable {
-    case speech = "Speech"
-    case video = "Video"
-
-    var id: String { rawValue }
-}
-
 final class AudioPlaybackObserver: NSObject, AVAudioPlayerDelegate {
     var onFinish: (() -> Void)?
 
@@ -125,13 +119,352 @@ final class AudioPlaybackObserver: NSObject, AVAudioPlayerDelegate {
     }
 }
 
+struct SpeechAppProject: Codable, Identifiable, Hashable {
+    var id: UUID
+    var name: String
+    var createdAt: Date
+    var updatedAt: Date
+    var videoURL: URL?
+    var audioURLs: [URL]
+
+    init(name: String) {
+        self.id = UUID()
+        self.name = name
+        self.createdAt = Date()
+        self.updatedAt = Date()
+        self.videoURL = nil
+        self.audioURLs = []
+    }
+}
+
+struct RecentProject: Codable, Identifiable, Hashable {
+    let url: URL
+    let lastOpenedAt: Date
+
+    var id: URL { url }
+    var title: String { url.deletingPathExtension().lastPathComponent }
+    var location: String { url.deletingLastPathComponent().path(percentEncoded: false) }
+}
+
+enum ProjectFileStore {
+    static let fileExtension = "speechproj"
+    private static let recentProjectsKey = "recentProjects"
+
+    @MainActor
+    static func createProject() throws -> (SpeechAppProject, URL)? {
+        let panel = NSSavePanel()
+        panel.title = "Create New Project"
+        panel.nameFieldStringValue = "Untitled.\(fileExtension)"
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.allowedContentTypes = [UTType(filenameExtension: fileExtension) ?? .json]
+
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+
+        let project = SpeechAppProject(name: url.deletingPathExtension().lastPathComponent)
+        try save(project, to: url)
+        addRecentProject(url)
+        return (project, url)
+    }
+
+    static func loadProject(from url: URL) throws -> SpeechAppProject {
+        let data = try Data(contentsOf: url)
+        let project = try JSONDecoder.projectDecoder.decode(SpeechAppProject.self, from: data)
+        addRecentProject(url)
+        return project
+    }
+
+    static func save(_ project: SpeechAppProject, to url: URL) throws {
+        var projectToSave = project
+        projectToSave.updatedAt = Date()
+        let data = try JSONEncoder.projectEncoder.encode(projectToSave)
+        try data.write(to: url, options: .atomic)
+    }
+
+    static func addRecentProject(_ url: URL) {
+        var projects = recentProjects().filter { $0.url != url }
+        projects.insert(RecentProject(url: url, lastOpenedAt: Date()), at: 0)
+        if projects.count > 12 {
+            projects = Array(projects.prefix(12))
+        }
+
+        guard let data = try? JSONEncoder.projectEncoder.encode(projects) else { return }
+        UserDefaults.standard.set(data, forKey: recentProjectsKey)
+    }
+
+    static func recentProjects() -> [RecentProject] {
+        guard let data = UserDefaults.standard.data(forKey: recentProjectsKey),
+              let projects = try? JSONDecoder.projectDecoder.decode([RecentProject].self, from: data)
+        else {
+            return []
+        }
+
+        return projects
+            .filter { FileManager.default.fileExists(atPath: $0.url.path(percentEncoded: false)) }
+            .sorted { $0.lastOpenedAt > $1.lastOpenedAt }
+    }
+}
+
+private extension JSONEncoder {
+    static var projectEncoder: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }
+}
+
+private extension JSONDecoder {
+    static var projectDecoder: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
+}
+
 struct ContentView: View {
+    @EnvironmentObject var backend: BackendProcessManager
+
+    @State private var currentProject: SpeechAppProject?
+    @State private var currentProjectURL: URL?
+    @State private var recentProjects: [RecentProject] = []
+    @State private var projectErrorMessage = ""
+    @State private var isShowingHelp = false
+
+    var body: some View {
+        ZStack {
+            if let project = currentProject, let projectURL = currentProjectURL {
+                VideoEditorView(
+                    project: binding(for: project),
+                    projectURL: projectURL,
+                    onCloseProject: closeProject
+                )
+                .frame(minWidth: 980, idealWidth: 1100, minHeight: 700, idealHeight: 760)
+            } else {
+                launchView
+                    .frame(minWidth: 760, idealWidth: 860, minHeight: 440, idealHeight: 520)
+            }
+        }
+        .onAppear {
+            recentProjects = ProjectFileStore.recentProjects()
+        }
+        .alert("Help", isPresented: $isShowingHelp) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Create or open a project, import a video, then use Add Narration to generate local Kokoro voiceover audio. Subtitle styling, word syncing, and FFmpeg burn-in will be added in later milestones.")
+        }
+    }
+
+    private func binding(for project: SpeechAppProject) -> Binding<SpeechAppProject> {
+        Binding(
+            get: { currentProject ?? project },
+            set: { newValue in
+                currentProject = newValue
+                saveCurrentProject()
+            }
+        )
+    }
+
+    private var launchView: some View {
+        HStack(spacing: 0) {
+            VStack(spacing: 28) {
+                Spacer()
+
+                VStack(spacing: 14) {
+                    placeholderAppIcon
+
+                    VStack(spacing: 4) {
+                        Text("Speech Studio")
+                            .font(.system(size: 38, weight: .bold, design: .rounded))
+                        Text("Version \(appVersion)")
+                            .font(.title3.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                VStack(spacing: 10) {
+                    Button(action: createNewProject) {
+                        Label("Create New Project", systemImage: "plus.square")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(LaunchButtonStyle())
+
+                    Button(action: { isShowingHelp = true }) {
+                        Label("Help", systemImage: "questionmark.circle")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(LaunchButtonStyle())
+                }
+                .frame(width: 360)
+
+                if !projectErrorMessage.isEmpty {
+                    Text(projectErrorMessage)
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(3)
+                        .frame(width: 420)
+                } else {
+                    Text(backend.isServerReady ? "Local voice engine ready" : backend.initializationMessage)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(34)
+
+            recentProjectsSidebar
+                .frame(width: 310)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var placeholderAppIcon: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 18)
+                .fill(LinearGradient(
+                    colors: [
+                        Color(red: 0.10, green: 0.58, blue: 0.95),
+                        Color(red: 0.06, green: 0.23, blue: 0.68)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ))
+
+            Image(systemName: "waveform.and.person.filled")
+                .font(.system(size: 54, weight: .semibold))
+                .foregroundStyle(.white)
+        }
+        .frame(width: 116, height: 116)
+        .shadow(color: .black.opacity(0.18), radius: 12, y: 6)
+    }
+
+    private var recentProjectsSidebar: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Previous Projects")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.top, 22)
+
+            if recentProjects.isEmpty {
+                ContentUnavailableView(
+                    "No Recent Projects",
+                    systemImage: "clock",
+                    description: Text("Saved projects will appear here.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(recentProjects) { project in
+                    Button(action: { openRecentProject(project) }) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "doc.badge.gearshape")
+                                .font(.system(size: 28))
+                                .foregroundStyle(.blue)
+                                .frame(width: 34)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(project.title)
+                                    .font(.headline)
+                                    .lineLimit(1)
+                                Text(project.location)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+
+                            Spacer()
+                        }
+                        .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .listStyle(.sidebar)
+                .scrollContentBackground(.hidden)
+            }
+        }
+        .background(.bar)
+    }
+
+    private var appVersion: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+
+        if let version, let build, version != build {
+            return "\(version) (\(build))"
+        }
+
+        return version ?? build ?? "0.1"
+    }
+
+    private func createNewProject() {
+        do {
+            guard let (project, url) = try ProjectFileStore.createProject() else { return }
+            projectErrorMessage = ""
+            currentProject = project
+            currentProjectURL = url
+            recentProjects = ProjectFileStore.recentProjects()
+        } catch {
+            projectErrorMessage = "Could not create project: \(error.localizedDescription)"
+        }
+    }
+
+    private func openRecentProject(_ recentProject: RecentProject) {
+        do {
+            currentProject = try ProjectFileStore.loadProject(from: recentProject.url)
+            currentProjectURL = recentProject.url
+            projectErrorMessage = ""
+            recentProjects = ProjectFileStore.recentProjects()
+        } catch {
+            projectErrorMessage = "Could not open project: \(error.localizedDescription)"
+            recentProjects = ProjectFileStore.recentProjects()
+        }
+    }
+
+    private func saveCurrentProject() {
+        guard let currentProject, let currentProjectURL else { return }
+
+        do {
+            try ProjectFileStore.save(currentProject, to: currentProjectURL)
+            ProjectFileStore.addRecentProject(currentProjectURL)
+            recentProjects = ProjectFileStore.recentProjects()
+            projectErrorMessage = ""
+        } catch {
+            projectErrorMessage = "Could not save project: \(error.localizedDescription)"
+        }
+    }
+
+    private func closeProject() {
+        saveCurrentProject()
+        currentProject = nil
+        currentProjectURL = nil
+        recentProjects = ProjectFileStore.recentProjects()
+    }
+}
+
+struct LaunchButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.title3.weight(.semibold))
+            .padding(.horizontal, 18)
+            .frame(height: 54)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(configuration.isPressed ? 0.78 : 1), in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(.separator.opacity(0.6))
+            }
+    }
+}
+
+struct SpeechNarrationView: View {
     @EnvironmentObject var backend: BackendProcessManager
 
     @State private var textInput = "Hello! I am now streaming audio dynamically chunk by chunk."
     @State private var statusMessage = ""
     @State private var statusKind: OperationStatus = .ready
-    @State private var selectedAppMode: AppMode = .speech
     @State private var selectedVoice = "af_heart"
     @State private var streamTask: Task<Void, Never>?
     @State private var fileTask: Task<Void, Never>?
@@ -154,14 +487,10 @@ struct ContentView: View {
             Color(nsColor: .windowBackgroundColor)
                 .ignoresSafeArea()
 
-            if !backend.isServerReady {
-                startupView
-            } else {
-                appView
-            }
+            backend.isServerReady ? AnyView(speechWorkspaceView) : AnyView(startupView)
         }
         .animation(.easeInOut(duration: 0.2), value: backend.isServerReady)
-        .frame(minWidth: 860, idealWidth: 980, minHeight: 560, idealHeight: 640)
+        .frame(minWidth: 780, idealWidth: 880, minHeight: 520, idealHeight: 600)
         .onAppear(perform: loadSavedRecordings)
         .onDisappear {
             cancelStreaming()
@@ -174,58 +503,13 @@ struct ContentView: View {
         VStack(spacing: 14) {
             ProgressView()
                 .controlSize(.large)
-            Text("Kokoro")
+            Text("Speech Studio")
                 .font(.system(size: 24, weight: .semibold, design: .rounded))
             Text(backend.initializationMessage)
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private var appView: some View {
-        Group {
-            switch selectedAppMode {
-            case .speech:
-                VStack(spacing: 0) {
-                    modeBar
-
-                    Divider()
-
-                    speechWorkspaceView
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-            case .video:
-                VStack(spacing: 0) {
-                    Color.clear
-                        .frame(height: 12)
-
-                    VideoEditorView {
-                        selectedAppMode = .speech
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(red: 0.105, green: 0.105, blue: 0.112))
-            }
-        }
-    }
-
-    private var modeBar: some View {
-        HStack {
-            Picker("Mode", selection: $selectedAppMode) {
-                ForEach(AppMode.allCases) { mode in
-                    Text(mode.rawValue).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 220)
-
-            Spacer()
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 10)
-        .background(.bar)
     }
 
     private var speechWorkspaceView: some View {

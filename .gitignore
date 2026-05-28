@@ -12,4 +12,6 @@ app.spec
 /.venv
 /__pycache__ 
 **/**/tts_backend
+**/**/ffmpeg
+**/**/ffprobe
 **/*.app/
