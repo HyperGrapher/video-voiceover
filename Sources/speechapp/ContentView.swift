@@ -484,6 +484,10 @@ struct MediaClip: Identifiable, Codable, Hashable {
     var fadeInDuration: Double
     var fadeOutDuration: Double
     var loop: Bool
+
+    var endTime: Double {
+        startTime + duration
+    }
 }
 
 struct ExportSettings: Codable, Hashable {

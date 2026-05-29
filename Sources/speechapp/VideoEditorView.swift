@@ -23,6 +23,7 @@ final class VideoEditorModel: ObservableObject {
 
     let player = AVPlayer()
     private let supportedVideoExtensions = ["mp4", "mov", "m4v", "mkv", "webm"]
+    private let supportedAudioExtensions = ["mp3", "aac", "m4a", "wav", "aiff", "aif"]
     private var narrationPlayers: [UUID: TimelineNarrationPlayer] = [:]
     var onVideoImported: ((URL) -> Void)?
 
@@ -43,6 +44,32 @@ final class VideoEditorModel: ObservableObject {
 
         Task {
             await importVideo(from: url)
+        }
+    }
+
+    func importAudio(completion: @escaping (URL, Double) -> Void) {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [
+            .audio,
+            .mp3,
+            .mpeg4Audio,
+            .wav,
+            .aiff
+        ]
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        Task {
+            do {
+                let importedURL = try copyAudioIntoAppStorage(url)
+                let duration = try await audioDuration(for: importedURL)
+                completion(importedURL, duration)
+            } catch {
+                statusMessage = "Could not import audio: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -300,6 +327,10 @@ final class VideoEditorModel: ObservableObject {
         supportedVideoExtensions.contains(url.pathExtension.lowercased())
     }
 
+    private func isSupportedAudio(_ url: URL) -> Bool {
+        supportedAudioExtensions.contains(url.pathExtension.lowercased())
+    }
+
     private func copyVideoIntoAppStorage(_ sourceURL: URL) throws -> URL {
         let didAccess = sourceURL.startAccessingSecurityScopedResource()
         defer {
@@ -315,6 +346,32 @@ final class VideoEditorModel: ObservableObject {
         return destinationURL
     }
 
+    private func copyAudioIntoAppStorage(_ sourceURL: URL) throws -> URL {
+        guard isSupportedAudio(sourceURL) else {
+            throw CocoaError(.fileReadUnsupportedScheme)
+        }
+
+        let didAccess = sourceURL.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                sourceURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let directory = try audioImportsDirectory()
+        let destinationURL = uniqueImportedAudioURL(for: sourceURL, in: directory)
+
+        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+        return destinationURL
+    }
+
+    private func audioDuration(for url: URL) async throws -> Double {
+        let asset = AVURLAsset(url: url)
+        let loadedDuration = try await asset.load(.duration)
+        let seconds = loadedDuration.seconds
+        return seconds.isFinite ? max(seconds, 0.1) : 0.1
+    }
+
     private func videoImportsDirectory() throws -> URL {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let directory = root.appendingPathComponent("speechapp/VideoImports", isDirectory: true)
@@ -322,7 +379,25 @@ final class VideoEditorModel: ObservableObject {
         return directory
     }
 
+    private func audioImportsDirectory() throws -> URL {
+        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let directory = root.appendingPathComponent("speechapp/AudioImports", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
     private func uniqueImportedVideoURL(for sourceURL: URL, in directory: URL) -> URL {
+        let baseName = sourceURL.deletingPathExtension().lastPathComponent
+        let fileExtension = sourceURL.pathExtension
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        let timestamp = formatter.string(from: Date())
+        let safeBaseName = sanitizedFilename(baseName)
+
+        return directory.appendingPathComponent("\(timestamp)_\(safeBaseName).\(fileExtension)")
+    }
+
+    private func uniqueImportedAudioURL(for sourceURL: URL, in directory: URL) -> URL {
         let baseName = sourceURL.deletingPathExtension().lastPathComponent
         let fileExtension = sourceURL.pathExtension
         let formatter = DateFormatter()
@@ -430,6 +505,7 @@ struct VideoEditorView: View {
                     shouldReplaceNarrationOnPlace = false
                     isShowingNarration = true
                 },
+                onImportAudioClip: importAudioClip,
                 onReplaceNarration: replaceNarrationFromTimeline,
                 onDeleteNarration: deleteNarrationFromTimeline
             )
@@ -731,6 +807,25 @@ struct VideoEditorView: View {
         loadNarrationsIntoModel()
         selectedNarrationClipID = nil
         renderMessage = "Removed narration from audio/subtitle tracks"
+    }
+
+    private func importAudioClip(for track: TrackDescriptor) {
+        model.importAudio { importedURL, duration in
+            let remainingProjectDuration = model.duration > model.currentTime ? model.duration - model.currentTime : duration
+            let clip = MediaClip(
+                id: UUID(),
+                trackId: track.id,
+                startTime: model.currentTime,
+                duration: min(duration, max(0.1, remainingProjectDuration)),
+                audioFilePath: importedURL.path(percentEncoded: false),
+                volume: track.type == .music ? 0.7 : 1.0,
+                fadeInDuration: 0,
+                fadeOutDuration: 0,
+                loop: false
+            )
+            project.mediaClips.append(clip)
+            renderMessage = "Imported \(importedURL.lastPathComponent)"
+        }
     }
 
     private func loadNarrationsIntoModel() {
@@ -1481,6 +1576,7 @@ struct TimelineViewShell: View {
     @Binding var project: SpeechAppProject
     @Binding var selectedNarrationClipID: UUID?
     let onAddNarration: () -> Void
+    let onImportAudioClip: (TrackDescriptor) -> Void
     let onReplaceNarration: () -> Void
     let onDeleteNarration: () -> Void
 
@@ -1658,7 +1754,17 @@ struct TimelineViewShell: View {
                         narrationClip(clip, track: track, timelineWidth: timelineWidth)
                     }
                 case .music, .sfx:
-                    mediaPlaceholder(track: track, timelineWidth: timelineWidth)
+                    let clips = project.mediaClips.filter { $0.trackId == track.id }
+                    if clips.isEmpty {
+                        mediaPlaceholder(track: track, timelineWidth: timelineWidth)
+                            .onTapGesture {
+                                onImportAudioClip(track)
+                            }
+                    } else {
+                        ForEach(clips) { clip in
+                            mediaClip(clip, track: track, timelineWidth: timelineWidth)
+                        }
+                    }
                 case .subtitleOverride:
                     subtitleOverridePlaceholder(track: track, timelineWidth: timelineWidth)
                 }
@@ -1673,12 +1779,6 @@ struct TimelineViewShell: View {
             .onTapGesture { location in
                 seek(canvasX: location.x, timelineWidth: timelineWidth)
             }
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        seek(canvasX: value.location.x, timelineWidth: timelineWidth)
-                    }
-            )
         }
     }
 
@@ -1705,38 +1805,22 @@ struct TimelineViewShell: View {
     }
 
     private func narrationClip(_ clip: NarrationClip, track: TrackDescriptor, timelineWidth: CGFloat) -> some View {
-        let displayStartTime = dragPreviewStartTimes[clip.id] ?? clip.startTime
-        let displayClip = clip.withStartTime(displayStartTime)
-        let x = xPosition(for: displayStartTime, width: timelineWidth)
+        let originalX = xPosition(for: clip.startTime, width: timelineWidth)
+        let previewStartTime = dragPreviewStartTimes[clip.id]
+        let previewClip = clip.withStartTime(previewStartTime ?? clip.startTime)
+        let previewX = previewStartTime.map { xPosition(for: $0, width: timelineWidth) }
         let width = max(96, durationWidth(clip.duration, width: timelineWidth))
-        return RoundedRectangle(cornerRadius: 6)
-            .fill(Color(hex: track.colour).opacity(0.78))
-            .frame(width: width, height: 42)
-            .overlay(alignment: .topLeading) {
-                Text(clip.text.isEmpty ? "Narration" : clip.text)
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(Color(hex: track.colour))
-                    .lineLimit(1)
-                    .padding(.horizontal, 10)
-                    .frame(maxWidth: width - 24, alignment: .leading)
-                    .background(.white, in: Capsule())
-                    .padding(8)
-            }
-            .overlay(alignment: .bottom) {
-                WaveformStrip(color: .white.opacity(0.52))
-                    .frame(height: 14)
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 5)
-            }
-            .overlay {
-                if !project.narrationOverlaps(for: displayClip).isEmpty {
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(.orange, style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
-                } else if selectedNarrationClipID == clip.id {
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(.white, lineWidth: 2)
-                }
-            }
+
+        return ZStack(alignment: .leading) {
+            narrationClipBlock(
+                clip: clip,
+                track: track,
+                width: width,
+                isSelected: selectedNarrationClipID == clip.id,
+                hasOverlap: !project.narrationOverlaps(for: clip).isEmpty
+            )
+            .opacity(previewStartTime == nil ? 1 : 0.32)
+            .offset(x: originalX)
             .onTapGesture {
                 selectedNarrationClipID = clip.id
             }
@@ -1763,7 +1847,22 @@ struct TimelineViewShell: View {
                         isDraggingClip = false
                     }
             )
-            .contextMenu {
+
+            if let previewX {
+                narrationClipBlock(
+                    clip: clip,
+                    track: track,
+                    width: width,
+                    isSelected: true,
+                    hasOverlap: !project.narrationOverlaps(for: previewClip).isEmpty
+                )
+                .opacity(0.82)
+                .offset(x: previewX)
+                .allowsHitTesting(false)
+            }
+        }
+        .frame(width: timelineWidth, height: 42, alignment: .leading)
+        .contextMenu {
                 Button("Play Clip") {
                     model.seek(to: clip.startTime)
                     model.togglePlayback()
@@ -1772,11 +1871,47 @@ struct TimelineViewShell: View {
                 Button(role: .destructive, action: { project.deleteNarrationClip(id: clip.id) }) {
                     Text("Delete Clip")
                 }
+        }
+        .animation(nil, value: previewStartTime)
+        .transaction { transaction in
+            transaction.animation = nil
+        }
+    }
+
+    private func narrationClipBlock(
+        clip: NarrationClip,
+        track: TrackDescriptor,
+        width: CGFloat,
+        isSelected: Bool,
+        hasOverlap: Bool
+    ) -> some View {
+        RoundedRectangle(cornerRadius: 6)
+            .fill(Color(hex: track.colour).opacity(0.78))
+            .frame(width: width, height: 42)
+            .overlay(alignment: .topLeading) {
+                Text(clip.text.isEmpty ? "Narration" : clip.text)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(Color(hex: track.colour))
+                    .lineLimit(1)
+                    .padding(.horizontal, 10)
+                    .frame(maxWidth: width - 24, alignment: .leading)
+                    .background(.white, in: Capsule())
+                    .padding(8)
             }
-            .offset(x: x)
-            .animation(nil, value: displayStartTime)
-            .transaction { transaction in
-                transaction.animation = nil
+            .overlay(alignment: .bottom) {
+                WaveformStrip(color: .white.opacity(0.52))
+                    .frame(height: 14)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 5)
+            }
+            .overlay {
+                if hasOverlap {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(.orange, style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
+                } else if isSelected {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(.white, lineWidth: 2)
+                }
             }
     }
 
@@ -1786,11 +1921,52 @@ struct TimelineViewShell: View {
             .fill(Color(hex: track.colour).opacity(track.muted ? 0.18 : 0.34))
             .frame(width: sampleWidth, height: 32)
             .overlay {
-                WaveformStrip(color: Color(hex: track.colour).opacity(0.5))
-                    .padding(.horizontal, 10)
+                HStack(spacing: 8) {
+                    Image(systemName: "plus.circle")
+                    Text("Click to import audio")
+                    WaveformStrip(color: Color(hex: track.colour).opacity(0.5))
+                        .frame(maxWidth: .infinity)
+                }
+                .font(.caption.weight(.medium))
+                .foregroundStyle(Color(hex: track.colour).opacity(0.85))
+                .padding(.horizontal, 10)
             }
             .padding(.leading, 64)
             .opacity(track.muted ? 0.65 : 1)
+    }
+
+    private func mediaClip(_ clip: MediaClip, track: TrackDescriptor, timelineWidth: CGFloat) -> some View {
+        let x = xPosition(for: clip.startTime, width: timelineWidth)
+        let width = max(80, durationWidth(clip.duration, width: timelineWidth))
+        let title = URL(fileURLWithPath: clip.audioFilePath).lastPathComponent
+
+        return RoundedRectangle(cornerRadius: 6)
+            .fill(Color(hex: track.colour).opacity(track.muted ? 0.28 : 0.64))
+            .frame(width: width, height: 36)
+            .overlay(alignment: .leading) {
+                HStack(spacing: 8) {
+                    WaveformStrip(color: .white.opacity(0.42))
+                        .frame(width: max(24, width * 0.45))
+                    Text(title)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 10)
+            }
+            .contextMenu {
+                Button("Rename Clip") {}
+                Button("Trim to Playhead") {
+                    trimMediaClipToPlayhead(clip)
+                }
+                Button(role: .destructive) {
+                    project.mediaClips.removeAll { $0.id == clip.id }
+                } label: {
+                    Text("Delete Clip")
+                }
+            }
+            .offset(x: x)
     }
 
     private func subtitleOverridePlaceholder(track: TrackDescriptor, timelineWidth: CGFloat) -> some View {
@@ -1814,6 +1990,17 @@ struct TimelineViewShell: View {
                 project.tracks[index] = updatedTrack
             }
         )
+    }
+
+    private func trimMediaClipToPlayhead(_ clip: MediaClip) {
+        guard model.currentTime > clip.startTime,
+              model.currentTime < clip.endTime,
+              let index = project.mediaClips.firstIndex(where: { $0.id == clip.id })
+        else {
+            return
+        }
+
+        project.mediaClips[index].duration = model.currentTime - clip.startTime
     }
 
     private var overlapCount: Int {
