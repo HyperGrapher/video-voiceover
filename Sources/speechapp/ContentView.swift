@@ -450,6 +450,12 @@ struct NarrationClip: Identifiable, Codable, Hashable {
     var endTime: Double {
         startTime + duration
     }
+
+    func withStartTime(_ startTime: Double) -> NarrationClip {
+        var clip = self
+        clip.startTime = startTime
+        return clip
+    }
 }
 
 struct WordTiming: Codable, Hashable {

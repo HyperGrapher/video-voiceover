@@ -4,6 +4,13 @@ import AVKit
 import AppKit
 import UniformTypeIdentifiers
 
+private struct TimelineNarrationPlayer {
+    let clipID: UUID
+    let timelineStart: Double
+    let duration: Double
+    let player: AVAudioPlayer
+}
+
 @MainActor
 final class VideoEditorModel: ObservableObject {
     @Published var selectedVideoURL: URL?
@@ -16,9 +23,7 @@ final class VideoEditorModel: ObservableObject {
 
     let player = AVPlayer()
     private let supportedVideoExtensions = ["mp4", "mov", "m4v", "mkv", "webm"]
-    private var narrationURL: URL?
-    private var narrationPlayer: AVAudioPlayer?
-    private var narrationTimelineStart: Double = 0
+    private var narrationPlayers: [UUID: TimelineNarrationPlayer] = [:]
     var onVideoImported: ((URL) -> Void)?
 
     func importVideo() {
@@ -88,7 +93,7 @@ final class VideoEditorModel: ObservableObject {
             selectedVideoURL = nil
             duration = 0
             currentTime = 0
-            narrationPlayer?.stop()
+            stopNarrations()
             player.replaceCurrentItem(with: nil)
             statusMessage = "Could not import video: \(error.localizedDescription)"
         }
@@ -119,7 +124,7 @@ final class VideoEditorModel: ObservableObject {
             selectedVideoURL = nil
             duration = 0
             currentTime = 0
-            narrationPlayer?.stop()
+            stopNarrations()
             player.replaceCurrentItem(with: nil)
             statusMessage = "Could not load video: \(error.localizedDescription)"
         }
@@ -133,7 +138,7 @@ final class VideoEditorModel: ObservableObject {
             duration = 0
             currentTime = 0
             isPlaying = false
-            narrationPlayer?.stop()
+            stopNarrations()
             player.replaceCurrentItem(with: nil)
             statusMessage = "Import a video to begin arranging."
             return
@@ -144,27 +149,39 @@ final class VideoEditorModel: ObservableObject {
         }
     }
 
-    func loadProjectNarration(_ narration: ProjectNarration?, timelineStart: Double = 0) {
-        guard narrationURL != narration?.url || narrationTimelineStart != timelineStart else { return }
-
-        narrationPlayer?.stop()
-        narrationPlayer = nil
-        narrationURL = narration?.url
-        narrationTimelineStart = timelineStart
-
-        guard let narration else {
-            return
+    func loadProjectNarrations(clips: [NarrationClip], narrations: [ProjectNarration]) {
+        let validClipIDs = Set(clips.map(\.id))
+        for clipID in narrationPlayers.keys where !validClipIDs.contains(clipID) {
+            narrationPlayers[clipID]?.player.stop()
+            narrationPlayers[clipID] = nil
         }
 
-        do {
-            let audioPlayer = try AVAudioPlayer(contentsOf: narration.url)
-            audioPlayer.prepareToPlay()
-            audioPlayer.currentTime = narrationLocalTime(for: currentTime, duration: audioPlayer.duration) ?? 0
-            narrationPlayer = audioPlayer
-            statusMessage = "Loaded narration \(narration.url.lastPathComponent)"
-        } catch {
-            statusMessage = "Could not load narration audio: \(error.localizedDescription)"
+        for clip in clips {
+            if let existing = narrationPlayers[clip.id],
+               existing.timelineStart == clip.startTime,
+               existing.duration == clip.duration {
+                continue
+            }
+
+            narrationPlayers[clip.id]?.player.stop()
+            guard let narration = narration(for: clip, in: narrations) else { continue }
+
+            do {
+                let audioPlayer = try AVAudioPlayer(contentsOf: narration.url)
+                audioPlayer.prepareToPlay()
+                audioPlayer.volume = 1
+                narrationPlayers[clip.id] = TimelineNarrationPlayer(
+                    clipID: clip.id,
+                    timelineStart: clip.startTime,
+                    duration: min(audioPlayer.duration, max(clip.duration, 0)),
+                    player: audioPlayer
+                )
+            } catch {
+                statusMessage = "Could not load narration audio: \(error.localizedDescription)"
+            }
         }
+
+        syncNarrations(to: currentTime, forceSeek: true)
     }
 
     func togglePlayback() {
@@ -172,15 +189,15 @@ final class VideoEditorModel: ObservableObject {
 
         if isPlaying {
             player.pause()
-            narrationPlayer?.pause()
+            pauseNarrations()
             isPlaying = false
         } else {
             if duration > 0 && currentTime >= duration {
                 seek(to: 0)
             }
             player.play()
-            playNarrationIfAvailable()
             isPlaying = true
+            syncNarrations(to: currentTime, forceSeek: true)
         }
     }
 
@@ -208,7 +225,7 @@ final class VideoEditorModel: ObservableObject {
             toleranceBefore: .zero,
             toleranceAfter: .zero
         )
-        syncNarration(to: clamped)
+        syncNarrations(to: clamped, forceSeek: true)
     }
 
     func syncCurrentTimeFromPlayer() {
@@ -216,49 +233,67 @@ final class VideoEditorModel: ObservableObject {
         guard seconds.isFinite else { return }
 
         currentTime = min(max(seconds, 0), duration)
-        if isPlaying && narrationPlayer?.isPlaying != true {
-            syncNarration(to: currentTime)
-        }
+        syncNarrations(to: currentTime, forceSeek: false)
         if isPlaying && duration > 0 && currentTime >= duration {
-            narrationPlayer?.stop()
+            stopNarrations()
             isPlaying = false
         }
     }
 
     private func stop() {
         player.pause()
-        narrationPlayer?.pause()
+        pauseNarrations()
         isPlaying = false
     }
 
-    private func playNarrationIfAvailable() {
-        guard let narrationPlayer else { return }
+    private func syncNarrations(to seconds: Double, forceSeek: Bool) {
+        for timelinePlayer in narrationPlayers.values {
+            let audioPlayer = timelinePlayer.player
+            guard let localTime = narrationLocalTime(
+                for: seconds,
+                timelineStart: timelinePlayer.timelineStart,
+                duration: timelinePlayer.duration
+            ) else {
+                if audioPlayer.isPlaying {
+                    audioPlayer.pause()
+                }
+                if forceSeek {
+                    audioPlayer.currentTime = seconds < timelinePlayer.timelineStart ? 0 : audioPlayer.duration
+                }
+                continue
+            }
 
-        syncNarration(to: currentTime)
-        if narrationLocalTime(for: currentTime, duration: narrationPlayer.duration) != nil {
-            narrationPlayer.play()
+            if forceSeek || !audioPlayer.isPlaying {
+                audioPlayer.currentTime = min(localTime, audioPlayer.duration)
+            }
+            if isPlaying && !audioPlayer.isPlaying {
+                audioPlayer.play()
+            }
         }
     }
 
-    private func syncNarration(to seconds: Double) {
-        guard let narrationPlayer else { return }
-
-        guard let localTime = narrationLocalTime(for: seconds, duration: narrationPlayer.duration) else {
-            narrationPlayer.pause()
-            narrationPlayer.currentTime = seconds < narrationTimelineStart ? 0 : narrationPlayer.duration
-            return
-        }
-
-        narrationPlayer.currentTime = localTime
-        if isPlaying && !narrationPlayer.isPlaying {
-            narrationPlayer.play()
+    private func pauseNarrations() {
+        for timelinePlayer in narrationPlayers.values {
+            timelinePlayer.player.pause()
         }
     }
 
-    private func narrationLocalTime(for timelineTime: Double, duration: Double) -> Double? {
-        let localTime = timelineTime - narrationTimelineStart
+    private func stopNarrations() {
+        for timelinePlayer in narrationPlayers.values {
+            timelinePlayer.player.stop()
+        }
+    }
+
+    private func narrationLocalTime(for timelineTime: Double, timelineStart: Double, duration: Double) -> Double? {
+        let localTime = timelineTime - timelineStart
         guard localTime >= 0, localTime < duration else { return nil }
         return min(max(localTime, 0), duration)
+    }
+
+    private func narration(for clip: NarrationClip, in narrations: [ProjectNarration]) -> ProjectNarration? {
+        narrations.first { narration in
+            narration.url.path(percentEncoded: false) == clip.audioFilePath
+        }
     }
 
     private func isSupportedVideo(_ url: URL) -> Bool {
@@ -332,11 +367,30 @@ struct VideoEditorView: View {
         return project.narrationClips.sorted { $0.startTime < $1.startTime }.first
     }
 
+    private var activePreviewNarrationClip: NarrationClip? {
+        project.narrationClips
+            .filter { model.currentTime >= $0.startTime && model.currentTime <= $0.endTime }
+            .sorted { lhs, rhs in
+                trackOrder(for: lhs.trackId) < trackOrder(for: rhs.trackId)
+            }
+            .first
+    }
+
+    private var activePreviewNarration: ProjectNarration? {
+        guard let activePreviewNarrationClip else { return nil }
+        return narration(for: activePreviewNarrationClip)
+    }
+
+    private var activePreviewNarrationLocalTime: Double? {
+        guard let activePreviewNarrationClip else { return nil }
+        let localTime = model.currentTime - activePreviewNarrationClip.startTime
+        guard localTime >= 0, localTime <= activePreviewNarrationClip.duration else { return nil }
+        return localTime
+    }
+
     private var activeNarration: ProjectNarration? {
         guard let activeNarrationClip else { return project.narrations.first }
-        return project.narrations.first { narration in
-            narration.url.path(percentEncoded: false) == activeNarrationClip.audioFilePath
-        } ?? project.narrations.first
+        return narration(for: activeNarrationClip) ?? project.narrations.first
     }
 
     private var activeNarrationLocalTime: Double? {
@@ -397,16 +451,16 @@ struct VideoEditorView: View {
             model.player.isMuted = project.videoAudioMuted
             model.player.volume = project.videoAudioVolume * Float(model.masterVolume)
             model.loadProjectVideo(project.videoURL)
-            loadActiveNarrationIntoModel()
+            loadNarrationsIntoModel()
         }
         .onChange(of: project.videoURL) { _, newURL in
             model.loadProjectVideo(newURL)
         }
         .onChange(of: project.narrations) { _, _ in
-            loadActiveNarrationIntoModel()
+            loadNarrationsIntoModel()
         }
         .onChange(of: project.narrationClips) { _, _ in
-            loadActiveNarrationIntoModel()
+            loadNarrationsIntoModel()
         }
         .onReceive(playbackTimer) { _ in
             model.syncCurrentTimeFromPlayer()
@@ -550,10 +604,10 @@ struct VideoEditorView: View {
                         PlayerPreviewView(player: model.player)
                             .background(Color.black)
 
-                        if let activeNarration, let activeNarrationLocalTime {
+                        if let activePreviewNarration, let activePreviewNarrationLocalTime {
                             SubtitlePreviewOverlay(
-                                narration: activeNarration,
-                                currentTime: activeNarrationLocalTime,
+                                narration: activePreviewNarration,
+                                currentTime: activePreviewNarrationLocalTime,
                                 style: project.subtitleStyle,
                                 previewSize: CGSize(width: previewWidth, height: previewHeight)
                             )
@@ -659,7 +713,7 @@ struct VideoEditorView: View {
         clip.startTime = project.autoNudgedStart(for: clip)
         project.addNarrationClip(clip)
         selectedNarrationClipID = clip.id
-        model.loadProjectNarration(narration, timelineStart: clip.startTime)
+        loadNarrationsIntoModel()
         renderMessage = "Narration placed at \(formatTimecode(clip.startTime))"
         isShowingNarration = false
     }
@@ -674,13 +728,23 @@ struct VideoEditorView: View {
         project.narrations.removeAll()
         project.narrationClips.removeAll()
         project.audioURLs.removeAll { narrationURLs.contains($0) }
-        model.loadProjectNarration(nil)
+        loadNarrationsIntoModel()
         selectedNarrationClipID = nil
         renderMessage = "Removed narration from audio/subtitle tracks"
     }
 
-    private func loadActiveNarrationIntoModel() {
-        model.loadProjectNarration(activeNarration, timelineStart: activeNarrationClip?.startTime ?? 0)
+    private func loadNarrationsIntoModel() {
+        model.loadProjectNarrations(clips: project.narrationClips, narrations: project.narrations)
+    }
+
+    private func narration(for clip: NarrationClip) -> ProjectNarration? {
+        project.narrations.first { narration in
+            narration.url.path(percentEncoded: false) == clip.audioFilePath
+        }
+    }
+
+    private func trackOrder(for trackID: UUID) -> Int {
+        project.tracks.first(where: { $0.id == trackID })?.order ?? Int.max
     }
 
     private func renderVideoWithSubtitles() {
@@ -1425,6 +1489,7 @@ struct TimelineViewShell: View {
     private let trackHeight: CGFloat = 56
     @State private var trackPendingDeletion: TrackDescriptor?
     @State private var dragStartTimes: [UUID: Double] = [:]
+    @State private var dragPreviewStartTimes: [UUID: Double] = [:]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1645,7 +1710,9 @@ struct TimelineViewShell: View {
     }
 
     private func narrationClip(_ clip: NarrationClip, track: TrackDescriptor, timelineWidth: CGFloat) -> some View {
-        let x = xPosition(for: clip.startTime, width: timelineWidth)
+        let displayStartTime = dragPreviewStartTimes[clip.id] ?? clip.startTime
+        let displayClip = clip.withStartTime(displayStartTime)
+        let x = xPosition(for: displayStartTime, width: timelineWidth)
         let width = max(96, durationWidth(clip.duration, width: timelineWidth))
         return RoundedRectangle(cornerRadius: 6)
             .fill(Color(hex: track.colour).opacity(0.78))
@@ -1667,7 +1734,7 @@ struct TimelineViewShell: View {
                     .padding(.bottom, 5)
             }
             .overlay {
-                if !project.narrationOverlaps(for: clip).isEmpty {
+                if !project.narrationOverlaps(for: displayClip).isEmpty {
                     RoundedRectangle(cornerRadius: 6)
                         .stroke(.orange, style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
                 } else if selectedNarrationClipID == clip.id {
@@ -1689,10 +1756,15 @@ struct TimelineViewShell: View {
                         }
                         let secondsDelta = Double(value.translation.width / timelineWidth) * max(model.duration, clip.duration, 1)
                         let proposed = (dragStartTimes[clip.id] ?? clip.startTime) + secondsDelta
-                        project.moveNarrationClip(id: clip.id, to: snappedStartTime(proposed, for: clip))
+                        dragPreviewStartTimes[clip.id] = snappedStartTime(proposed, for: clip)
                     }
                     .onEnded { _ in
+                        if let previewStartTime = dragPreviewStartTimes[clip.id] {
+                            project.moveNarrationClip(id: clip.id, to: previewStartTime)
+                            model.seek(to: previewStartTime)
+                        }
                         dragStartTimes[clip.id] = nil
+                        dragPreviewStartTimes[clip.id] = nil
                     }
             )
             .contextMenu {
@@ -1706,6 +1778,7 @@ struct TimelineViewShell: View {
                 }
             }
             .padding(.leading, x)
+            .animation(nil, value: displayStartTime)
     }
 
     private func mediaPlaceholder(track: TrackDescriptor, timelineWidth: CGFloat) -> some View {
