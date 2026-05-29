@@ -363,8 +363,20 @@ Master strip:
 | Secondary colour | Colour well (inactive words) |
 | Background pill | Toggle + colour well + opacity slider |
 | Drop shadow | Toggle + colour well + blur radius slider |
-| Presets | Buttons: `Bold White`, `Karaoke Yellow`, `Minimal`, `Dark Pill` — overwrite all current settings |
+| Presets | Buttons: `Clean White`, `TikTok Yellow`, `Bold Meme`, `Minimal Lower Third`, `Dark Pill` — overwrite all current settings |
 | Live mini-preview | Rendered subtitle line at top of tab, updates in real time |
+
+### 8.4.1 Required Subtitle Presets
+
+Each preset must update project-level `SubtitleStyleSettings` and immediately refresh preview/export output. Presets are non-destructive until the project is saved.
+
+| Preset | Intent | Defaults |
+|---|---|---|
+| `Clean White` | General readable captions | White text, yellow active word, black outline, no pill |
+| `TikTok Yellow` | Short-form karaoke style | White inactive text, bright yellow active word, bold, strong outline |
+| `Bold Meme` | High-impact meme captions | Large white uppercase-style look, thick black outline, low bottom margin |
+| `Minimal Lower Third` | Quiet professional lower caption | Smaller white text, subtle outline/shadow, lower-third placement |
+| `Dark Pill` | Readability over busy footage | White text inside semi-transparent dark rounded pill |
 
 ---
 
@@ -377,6 +389,7 @@ Master strip:
 | Video codec | Picker: `H.264` / `H.265` / `ProRes 422` |
 | Audio codec | Picker: `AAC 192kbps` / `AAC 256kbps` / `PCM` |
 | Include subtitles | Toggle (burn-in vs clean export) |
+| Export sidecars | Toggle group: `.ass`, `words.json`, and optional export metadata. Sidecars are copied beside the final video when enabled. |
 | FFmpeg binary path | Auto-detected; override field for custom installs |
 | `Verify FFmpeg` button | Runs diagnostic, shows libass availability |
 | Export Log | Collapsible accordion showing last FFmpeg stdout/stderr. Errors in red. `Open in TextEdit` link. |
@@ -439,7 +452,12 @@ Extend the existing JSON structure with the following top-level keys:
     "filenameTemplate": "%project_%date",
     "videoCodec": "h264",
     "audioCodec": "aac_192",
-    "includeSubtitles": true
+    "includeSubtitles": true,
+    "sidecarArtifacts": {
+      "ass": false,
+      "wordsJson": false,
+      "metadata": false
+    }
   }
 }
 ```
@@ -502,6 +520,13 @@ struct ExportSettings: Codable {
     var videoCodec: VideoCodec
     var audioCodec: AudioCodec
     var includeSubtitles: Bool
+    var sidecarArtifacts: SidecarArtifactSettings
+}
+
+struct SidecarArtifactSettings: Codable {
+    var ass: Bool
+    var wordsJson: Bool
+    var metadata: Bool
 }
 
 enum VideoCodec: String, Codable { case h264, h265, prores422 }
@@ -565,8 +590,8 @@ enum AudioCodec: String, Codable { case aac192, aac256, pcm }
 - [ ] **Clip tab:** all controls per Section 8.1. Word timing table with editable rows.
 - [ ] **Subtitles tab:** all controls per Section 8.2. Wire to existing `SubtitleStyleSettings`.
 - [ ] **Audio Mix tab:** channel strips. Sync fader/M/S state bidirectionally with track headers.
-- [ ] **Appearance tab:** font picker, colour wells, presets, live mini-preview.
-- [ ] **Export tab:** all fields per Section 8.5. FFmpeg verify button. Export log accordion.
+- [ ] **Appearance tab:** font picker, colour wells, required presets from Section 8.4.1, live mini-preview.
+- [ ] **Export tab:** all fields per Section 8.5. FFmpeg verify button. Export log accordion. Sidecar toggles for `.ass`, `words.json`, and metadata.
 
 ### Phase F — Subtitle Compositor & Export Polish (est. 2 days)
 
@@ -575,6 +600,7 @@ enum AudioCodec: String, Codable { case aac192, aac256, pcm }
 - [ ] Video original audio: wire mute toggle and volume knob to the `AVPlayerNode` used by `AVPlayerView`.
 - [ ] Update `.speechproj` serialisation with all new fields. Verify round-trip fidelity.
 - [ ] Extend FFmpeg `.ass` export to merge clips from all Narration tracks (currently assumes single track).
+- [ ] Implement sidecar artifact export: copy generated `.ass`, `words.json`, and metadata beside the final video when toggled on.
 
 ### Phase G — QA & Hardening (est. 2 days)
 
@@ -607,7 +633,7 @@ These decisions are already made in `AGENTS.md` and must not be reversed:
 
 - Python backend Phase 4 endpoint (`/export/video-with-word-subtitles`) — export is fully Swift-side.
 - Bundled FFmpeg/ffprobe installer — user installs via Homebrew.
-- VTT / SRT / ASS file export as standalone artifacts (Phase 7 optional).
+- VTT / SRT export as standalone artifacts. `.ass` and `words.json` sidecar export are in scope via Export settings.
 - Original audio mixing with pitch-corrected speed changes.
 - Timeline markers / chapter points.
 - Multi-camera or B-roll tracks.
