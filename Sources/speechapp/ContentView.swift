@@ -263,11 +263,21 @@ struct SpeechAppProject: Codable, Identifiable, Hashable {
 
     mutating func reorderTrack(id: UUID, to targetOrder: Int) {
         guard let sourceIndex = tracks.firstIndex(where: { $0.id == id }) else { return }
-        var track = tracks.remove(at: sourceIndex)
+        let track = tracks.remove(at: sourceIndex)
         let clampedOrder = min(max(targetOrder, 0), tracks.count)
         tracks.insert(track, at: clampedOrder)
-        track.order = clampedOrder
         normalizeTrackOrder()
+    }
+
+    mutating func setTrackSolo(id: UUID, isSolo: Bool) {
+        for index in tracks.indices {
+            tracks[index].solo = isSolo && tracks[index].id == id
+        }
+    }
+
+    mutating func moveNarrationClip(id: UUID, to startTime: Double) {
+        guard let index = narrationClips.firstIndex(where: { $0.id == id }) else { return }
+        narrationClips[index].startTime = max(0, startTime)
     }
 
     mutating func addNarrationClip(_ clip: NarrationClip) {

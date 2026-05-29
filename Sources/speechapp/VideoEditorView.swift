@@ -358,13 +358,20 @@ struct VideoEditorView: View {
 
                 Divider()
 
-                EditorInspectorPanel(project: $project, isRendering: isRendering, exportLog: exportDiagnosticsLog, onExport: renderVideoWithSubtitles)
+                EditorInspectorPanel(
+                    project: $project,
+                    selectedNarrationClipID: selectedNarrationClipID,
+                    isRendering: isRendering,
+                    exportLog: exportDiagnosticsLog,
+                    onExport: renderVideoWithSubtitles
+                )
                     .frame(width: 360)
             }
 
             TimelineViewShell(
                 model: model,
                 project: $project,
+                selectedNarrationClipID: $selectedNarrationClipID,
                 onAddNarration: {
                     shouldReplaceNarrationOnPlace = false
                     isShowingNarration = true
@@ -1023,6 +1030,7 @@ enum InspectorTab: String, CaseIterable, Identifiable {
 
 struct EditorInspectorPanel: View {
     @Binding var project: SpeechAppProject
+    let selectedNarrationClipID: UUID?
     let isRendering: Bool
     let exportLog: String
     let onExport: () -> Void
@@ -1077,7 +1085,7 @@ struct EditorInspectorPanel: View {
 
     private var clipTab: some View {
         Group {
-            if let clip = project.narrationClips.first {
+            if let clip = selectedNarrationClip {
                 LabeledContent("Clip name") {
                     Text("Narration")
                 }
@@ -1101,6 +1109,15 @@ struct EditorInspectorPanel: View {
                     .frame(maxWidth: .infinity, minHeight: 220)
             }
         }
+    }
+
+    private var selectedNarrationClip: NarrationClip? {
+        if let selectedNarrationClipID,
+           let selectedClip = project.narrationClips.first(where: { $0.id == selectedNarrationClipID }) {
+            return selectedClip
+        }
+
+        return project.narrationClips.first
     }
 
     private var subtitlesTab: some View {
@@ -1237,16 +1254,33 @@ struct TrackHeaderView: View {
     @Binding var track: TrackDescriptor
     @Binding var videoAudioMuted: Bool
     @Binding var videoAudioVolume: Float
+    let onSolo: (Bool) -> Void
+    let onDelete: () -> Void
+
+    @State private var isEditingName = false
 
     var body: some View {
         HStack(spacing: 8) {
-            Rectangle()
-                .fill(Color(hex: track.colour))
-                .frame(width: 14, height: 14)
-                .cornerRadius(3)
-            Text(track.name)
-                .font(.callout)
-                .lineLimit(1)
+            ColorPicker("", selection: Binding(
+                get: { Color(hex: track.colour) },
+                set: { track.colour = $0.hexString() }
+            ), supportsOpacity: false)
+            .labelsHidden()
+            .frame(width: 18)
+
+            if isEditingName {
+                TextField("Track name", text: $track.name)
+                    .textFieldStyle(.plain)
+                    .font(.callout)
+                    .onSubmit { isEditingName = false }
+            } else {
+                Text(track.name)
+                    .font(.callout)
+                    .lineLimit(1)
+                    .onTapGesture(count: 2) {
+                        isEditingName = true
+                    }
+            }
             Spacer()
             if track.type == .video {
                 Button(action: { videoAudioMuted.toggle() }) {
@@ -1271,7 +1305,9 @@ struct TrackHeaderView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 if track.type != .subtitleOverride {
-                    Button("S") { track.solo.toggle() }
+                    Button("S") {
+                        onSolo(!track.solo)
+                    }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                 }
@@ -1284,10 +1320,22 @@ struct TrackHeaderView: View {
                 }
                 .buttonStyle(.borderless)
             }
+            Button(action: { track.isExpanded.toggle() }) {
+                Image(systemName: track.isExpanded ? "chevron.down" : "chevron.right")
+            }
+            .buttonStyle(.borderless)
+            .help(track.isExpanded ? "Collapse track" : "Expand track")
         }
         .padding(.horizontal, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
+        .contextMenu {
+            if track.type != .video {
+                Button(role: .destructive, action: onDelete) {
+                    Text("Delete Track")
+                }
+            }
+        }
     }
 }
 
@@ -1367,6 +1415,7 @@ struct WaveformStrip: View {
 struct TimelineViewShell: View {
     @ObservedObject var model: VideoEditorModel
     @Binding var project: SpeechAppProject
+    @Binding var selectedNarrationClipID: UUID?
     let onAddNarration: () -> Void
     let onReplaceNarration: () -> Void
     let onDeleteNarration: () -> Void
@@ -1374,6 +1423,8 @@ struct TimelineViewShell: View {
     private let labelColumnWidth: CGFloat = 248
     private let rulerHeight: CGFloat = 28
     private let trackHeight: CGFloat = 56
+    @State private var trackPendingDeletion: TrackDescriptor?
+    @State private var dragStartTimes: [UUID: Double] = [:]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1412,6 +1463,21 @@ struct TimelineViewShell: View {
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .alert("Delete Track", isPresented: deleteTrackAlertBinding, presenting: trackPendingDeletion) { track in
+            Button("Cancel", role: .cancel) {
+                trackPendingDeletion = nil
+            }
+            Button("Delete Track", role: .destructive) {
+                project.deleteTrack(id: track.id)
+                if let selectedNarrationClipID,
+                   !project.narrationClips.contains(where: { $0.id == selectedNarrationClipID }) {
+                    self.selectedNarrationClipID = nil
+                }
+                trackPendingDeletion = nil
+            }
+        } message: { track in
+            Text("Delete this track and all \(clipCount(for: track)) clips on it? This cannot be undone.")
+        }
     }
 
     private var timelineToolbar: some View {
@@ -1505,7 +1571,17 @@ struct TimelineViewShell: View {
 
     private func trackRow(_ track: TrackDescriptor, timelineWidth: CGFloat) -> some View {
         HStack(spacing: 0) {
-            TrackHeaderView(track: binding(for: track), videoAudioMuted: $project.videoAudioMuted, videoAudioVolume: $project.videoAudioVolume)
+            TrackHeaderView(
+                track: binding(for: track),
+                videoAudioMuted: $project.videoAudioMuted,
+                videoAudioVolume: $project.videoAudioVolume,
+                onSolo: { isSolo in
+                    project.setTrackSolo(id: track.id, isSolo: isSolo)
+                },
+                onDelete: {
+                    trackPendingDeletion = track
+                }
+            )
                 .frame(width: labelColumnWidth)
 
             ZStack(alignment: .leading) {
@@ -1594,8 +1670,31 @@ struct TimelineViewShell: View {
                 if !project.narrationOverlaps(for: clip).isEmpty {
                     RoundedRectangle(cornerRadius: 6)
                         .stroke(.orange, style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
+                } else if selectedNarrationClipID == clip.id {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(.white, lineWidth: 2)
                 }
             }
+            .onTapGesture {
+                selectedNarrationClipID = clip.id
+                model.seek(to: clip.startTime)
+            }
+            .gesture(
+                DragGesture(minimumDistance: 3)
+                    .onChanged { value in
+                        guard !track.locked else { return }
+                        if dragStartTimes[clip.id] == nil {
+                            dragStartTimes[clip.id] = clip.startTime
+                            selectedNarrationClipID = clip.id
+                        }
+                        let secondsDelta = Double(value.translation.width / timelineWidth) * max(model.duration, clip.duration, 1)
+                        let proposed = (dragStartTimes[clip.id] ?? clip.startTime) + secondsDelta
+                        project.moveNarrationClip(id: clip.id, to: snappedStartTime(proposed, for: clip))
+                    }
+                    .onEnded { _ in
+                        dragStartTimes[clip.id] = nil
+                    }
+            )
             .contextMenu {
                 Button("Play Clip") {
                     model.seek(to: clip.startTime)
@@ -1651,6 +1750,18 @@ struct TimelineViewShell: View {
         }
     }
 
+    private var deleteTrackAlertBinding: Binding<Bool> {
+        Binding(
+            get: { trackPendingDeletion != nil },
+            set: { if !$0 { trackPendingDeletion = nil } }
+        )
+    }
+
+    private func clipCount(for track: TrackDescriptor) -> Int {
+        project.narrationClips.filter { $0.trackId == track.id }.count +
+        project.mediaClips.filter { $0.trackId == track.id }.count
+    }
+
     private var playhead: some View {
         VStack(spacing: 0) {
             Triangle()
@@ -1695,6 +1806,23 @@ struct TimelineViewShell: View {
     private func durationWidth(_ duration: Double, width: CGFloat) -> CGFloat {
         let total = max(model.duration, duration, 1)
         return width * CGFloat(duration / total)
+    }
+
+    private func snappedStartTime(_ proposedStart: Double, for clip: NarrationClip) -> Double {
+        let duration = max(model.duration, clip.duration, 1)
+        let snapSeconds = duration * Double(4 / max(1, CGFloat(900)))
+        var candidates = [0, model.currentTime]
+        candidates.append(contentsOf: project.narrationClips
+            .filter { $0.id != clip.id && $0.trackId == clip.trackId }
+            .flatMap { [$0.startTime, $0.endTime] })
+
+        guard let nearest = candidates.min(by: { abs($0 - proposedStart) < abs($1 - proposedStart) }),
+              abs(nearest - proposedStart) <= snapSeconds
+        else {
+            return max(0, min(proposedStart, duration))
+        }
+
+        return max(0, min(nearest, duration))
     }
 
     private func seek(canvasX: CGFloat, timelineWidth: CGFloat) {

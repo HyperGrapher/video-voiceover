@@ -541,11 +541,11 @@ enum AudioCodec: String, Codable { case aac192, aac256, pcm }
 
 ### Phase A — Track Data Model (est. 3 days)
 
-- [ ] Define `TrackDescriptor`, `NarrationClip`, `MediaClip`, `ExportSettings` Swift structs.
-- [ ] Extend `.speechproj` serialisation to include all new keys; maintain backward compatibility (missing keys → sensible defaults).
-- [ ] Implement `ProjectStore` CRUD: `addTrack`, `deleteTrack`, `reorderTrack`, `addClip`, `deleteClip`, `moveClip`.
-- [ ] Overlap detection function: given a `TrackDescriptor` and a proposed `NarrationClip`, return all overlapping clips.
-- [ ] Auto-nudge function: returns the earliest non-overlapping `startTime` for a clip on a given track.
+- [x] Define `TrackDescriptor`, `NarrationClip`, `MediaClip`, `ExportSettings` Swift structs.
+- [x] Extend `.speechproj` serialisation to include all new keys; maintain backward compatibility (missing keys → sensible defaults).
+- [x] Implement `ProjectStore` CRUD: `addTrack`, `deleteTrack`, `reorderTrack`, `addClip`, `deleteClip`, `moveClip`.
+- [x] Overlap detection function: given a `TrackDescriptor` and a proposed `NarrationClip`, return all overlapping clips.
+- [x] Auto-nudge function: returns the earliest non-overlapping `startTime` for a clip on a given track.
 - [ ] Unit tests for overlap detection and auto-nudge edge cases.
 
 ### Phase B — Track Header UI (est. 3 days)
@@ -553,8 +553,8 @@ enum AudioCodec: String, Codable { case aac192, aac256, pcm }
 - [ ] `TrackHeaderView`: colour swatch, name label (inline edit), M/S/👁/🔒 toggle buttons, volume knob, expand arrow.
 - [ ] Solo logic: toggling solo on one track mutes all others; stores previous mute states; restoring un-solo restores them.
 - [ ] Drag-to-reorder track headers. Blue insertion indicator. Updates `TrackDescriptor.order`.
-- [ ] `+` Add Track popover.
-- [ ] Delete Track confirmation sheet.
+- [x] `+` Add Track popover.
+- [x] Delete Track confirmation sheet.
 - [ ] Video track header: mute original audio toggle + volume knob only.
 
 ### Phase C — Clip Rendering on Canvas (est. 4 days)
@@ -563,14 +563,14 @@ enum AudioCodec: String, Codable { case aac192, aac256, pcm }
 - [ ] Render video thumbnail frames (pre-render to `CGImage` array on import).
 - [ ] Render narration waveforms offline (pre-render from `.m4a` via `AVAssetReader` + Accelerate vDSP).
 - [ ] Render music/SFX waveforms (same pipeline).
-- [ ] Subtitle pill on narration clips.
+- [x] Subtitle pill on narration clips.
 - [ ] Drag-to-move (horizontal only) with snap logic. Snap zone: 4 pt. `Option` key disables snap.
-- [ ] Overlap detection → yellow warning stripes. Timeline toolbar overlap badge.
+- [x] Overlap detection → yellow warning stripes. Timeline toolbar overlap badge.
 - [ ] Selection state: selected clip highlighted, Inspector updates.
 - [ ] Context menus per clip type.
 - [ ] Trim handles on Music/SFX clips (drag left/right edges).
 - [ ] Fade triangle handles on Music/SFX clips.
-- [ ] Lock check: locked clips reject drag gestures.
+- [x] Lock check: locked clips reject drag gestures.
 
 ### Phase D — Audio Engine Integration (est. 4 days)
 
