@@ -16,6 +16,8 @@ struct TimelineViewShell: View {
     @State private var trackPendingDeletion: TrackDescriptor?
     @State private var dragStartTimes: [UUID: Double] = [:]
     @State private var dragPreviewStartTimes: [UUID: Double] = [:]
+    @State private var mediaDragStartTimings: [UUID: (startTime: Double, duration: Double)] = [:]
+    @State private var mediaPreviewTimings: [UUID: (startTime: Double, duration: Double)] = [:]
     @State private var isDraggingClip = false
 
     var body: some View {
@@ -366,11 +368,68 @@ struct TimelineViewShell: View {
     }
 
     private func mediaClip(_ clip: MediaClip, track: TrackDescriptor, timelineWidth: CGFloat) -> some View {
-        let x = xPosition(for: clip.startTime, width: timelineWidth)
-        let width = max(80, durationWidth(clip.duration, width: timelineWidth))
+        let previewTiming = mediaPreviewTimings[clip.id]
+        let displayClip = previewTiming.map { clip.withTiming(startTime: $0.startTime, duration: $0.duration) } ?? clip
+        let originalX = xPosition(for: clip.startTime, width: timelineWidth)
+        let originalWidth = max(80, durationWidth(clip.duration, width: timelineWidth))
+        let previewX = previewTiming.map { xPosition(for: $0.startTime, width: timelineWidth) }
+        let previewWidth = previewTiming.map { max(80, durationWidth($0.duration, width: timelineWidth)) }
         let title = URL(fileURLWithPath: clip.audioFilePath).lastPathComponent
 
-        return RoundedRectangle(cornerRadius: 6)
+        return ZStack(alignment: .leading) {
+            mediaClipBlock(
+                title: title,
+                clip: clip,
+                track: track,
+                width: originalWidth,
+                timelineWidth: timelineWidth,
+                showsHandles: previewTiming == nil
+            )
+            .opacity(previewTiming == nil ? 1 : 0.32)
+            .offset(x: originalX)
+            .highPriorityGesture(mediaMoveGesture(for: clip, track: track, timelineWidth: timelineWidth))
+
+            if let previewX, let previewWidth {
+                mediaClipBlock(
+                    title: title,
+                    clip: displayClip,
+                    track: track,
+                    width: previewWidth,
+                    timelineWidth: timelineWidth,
+                    showsHandles: false
+                )
+                .opacity(0.82)
+                .offset(x: previewX)
+                .allowsHitTesting(false)
+            }
+        }
+        .frame(width: timelineWidth, height: 36, alignment: .leading)
+        .contextMenu {
+            Button("Rename Clip") {}
+            Button("Trim to Playhead") {
+                trimMediaClipToPlayhead(clip)
+            }
+            Button(role: .destructive) {
+                project.mediaClips.removeAll { $0.id == clip.id }
+            } label: {
+                Text("Delete Clip")
+            }
+        }
+        .animation(nil, value: previewTiming?.startTime)
+        .transaction { transaction in
+            transaction.animation = nil
+        }
+    }
+
+    private func mediaClipBlock(
+        title: String,
+        clip: MediaClip,
+        track: TrackDescriptor,
+        width: CGFloat,
+        timelineWidth: CGFloat,
+        showsHandles: Bool
+    ) -> some View {
+        RoundedRectangle(cornerRadius: 6)
             .fill(Color(hex: track.colour).opacity(track.muted ? 0.28 : 0.64))
             .frame(width: width, height: 36)
             .overlay(alignment: .leading) {
@@ -385,18 +444,86 @@ struct TimelineViewShell: View {
                 }
                 .padding(.horizontal, 10)
             }
-            .contextMenu {
-                Button("Rename Clip") {}
-                Button("Trim to Playhead") {
-                    trimMediaClipToPlayhead(clip)
-                }
-                Button(role: .destructive) {
-                    project.mediaClips.removeAll { $0.id == clip.id }
-                } label: {
-                    Text("Delete Clip")
+            .overlay(alignment: .leading) {
+                if showsHandles {
+                    mediaTrimHandle(edge: .leading, clip: clip, track: track, timelineWidth: timelineWidth)
                 }
             }
-            .offset(x: x)
+            .overlay(alignment: .trailing) {
+                if showsHandles {
+                    mediaTrimHandle(edge: .trailing, clip: clip, track: track, timelineWidth: timelineWidth)
+                }
+            }
+    }
+
+    private enum MediaTrimEdge {
+        case leading
+        case trailing
+    }
+
+    private func mediaTrimHandle(edge: MediaTrimEdge, clip: MediaClip, track: TrackDescriptor, timelineWidth: CGFloat) -> some View {
+        Rectangle()
+            .fill(.white.opacity(0.70))
+            .frame(width: 6, height: 34)
+            .contentShape(Rectangle().inset(by: -5))
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 2)
+                    .onChanged { value in
+                        guard !track.locked else { return }
+                        if mediaDragStartTimings[clip.id] == nil {
+                            mediaDragStartTimings[clip.id] = (clip.startTime, clip.duration)
+                            isDraggingClip = true
+                        }
+                        let startTiming = mediaDragStartTimings[clip.id] ?? (clip.startTime, clip.duration)
+                        let secondsDelta = seconds(forHorizontalTranslation: value.translation.width, timelineWidth: timelineWidth)
+                        mediaPreviewTimings[clip.id] = trimmedTiming(
+                            startTiming: startTiming,
+                            edge: edge,
+                            secondsDelta: secondsDelta
+                        )
+                    }
+                    .onEnded { _ in
+                        if let previewTiming = mediaPreviewTimings[clip.id] {
+                            project.updateMediaClipTiming(
+                                id: clip.id,
+                                startTime: previewTiming.startTime,
+                                duration: previewTiming.duration
+                            )
+                        }
+                        mediaDragStartTimings[clip.id] = nil
+                        mediaPreviewTimings[clip.id] = nil
+                        isDraggingClip = false
+                    }
+            )
+    }
+
+    private func mediaMoveGesture(for clip: MediaClip, track: TrackDescriptor, timelineWidth: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 3)
+            .onChanged { value in
+                guard !track.locked else { return }
+                if mediaDragStartTimings[clip.id] == nil {
+                    mediaDragStartTimings[clip.id] = (clip.startTime, clip.duration)
+                    isDraggingClip = true
+                }
+                let startTiming = mediaDragStartTimings[clip.id] ?? (clip.startTime, clip.duration)
+                let secondsDelta = seconds(forHorizontalTranslation: value.translation.width, timelineWidth: timelineWidth)
+                mediaPreviewTimings[clip.id] = (
+                    startTime: clampedMediaStart(startTiming.startTime + secondsDelta, duration: startTiming.duration),
+                    duration: startTiming.duration
+                )
+            }
+            .onEnded { _ in
+                if let previewTiming = mediaPreviewTimings[clip.id] {
+                    project.updateMediaClipTiming(
+                        id: clip.id,
+                        startTime: previewTiming.startTime,
+                        duration: previewTiming.duration
+                    )
+                }
+                mediaDragStartTimings[clip.id] = nil
+                mediaPreviewTimings[clip.id] = nil
+                isDraggingClip = false
+            }
     }
 
     private func subtitleOverridePlaceholder(track: TrackDescriptor, timelineWidth: CGFloat) -> some View {
@@ -431,6 +558,38 @@ struct TimelineViewShell: View {
         }
 
         project.mediaClips[index].duration = model.currentTime - clip.startTime
+    }
+
+    private func seconds(forHorizontalTranslation translation: CGFloat, timelineWidth: CGFloat) -> Double {
+        Double(translation / timelineWidth) * max(model.duration, 1)
+    }
+
+    private func clampedMediaStart(_ proposedStart: Double, duration: Double) -> Double {
+        max(0, min(proposedStart, max(model.duration - duration, 0)))
+    }
+
+    private func trimmedTiming(
+        startTiming: (startTime: Double, duration: Double),
+        edge: MediaTrimEdge,
+        secondsDelta: Double
+    ) -> (startTime: Double, duration: Double) {
+        let minimumDuration = 0.1
+        switch edge {
+        case .leading:
+            let originalEnd = startTiming.startTime + startTiming.duration
+            let proposedStart = max(0, min(startTiming.startTime + secondsDelta, originalEnd - minimumDuration))
+            return (
+                startTime: proposedStart,
+                duration: max(minimumDuration, originalEnd - proposedStart)
+            )
+        case .trailing:
+            let proposedEnd = max(startTiming.startTime + minimumDuration, startTiming.startTime + startTiming.duration + secondsDelta)
+            let clampedEnd = min(max(model.duration, startTiming.startTime + minimumDuration), proposedEnd)
+            return (
+                startTime: startTiming.startTime,
+                duration: max(minimumDuration, clampedEnd - startTiming.startTime)
+            )
+        }
     }
 
     private var overlapCount: Int {

@@ -114,6 +114,12 @@ struct SpeechAppProject: Codable, Identifiable, Hashable {
         narrationClips[index].startTime = max(0, startTime)
     }
 
+    mutating func updateMediaClipTiming(id: UUID, startTime: Double, duration: Double) {
+        guard let index = mediaClips.firstIndex(where: { $0.id == id }) else { return }
+        mediaClips[index].startTime = max(0, startTime)
+        mediaClips[index].duration = max(0.1, duration)
+    }
+
     mutating func addNarrationClip(_ clip: NarrationClip) {
         narrationClips.append(clip)
     }
@@ -321,6 +327,13 @@ struct MediaClip: Identifiable, Codable, Hashable {
 
     var endTime: Double {
         startTime + duration
+    }
+
+    func withTiming(startTime: Double, duration: Double) -> MediaClip {
+        var clip = self
+        clip.startTime = startTime
+        clip.duration = duration
+        return clip
     }
 }
 
