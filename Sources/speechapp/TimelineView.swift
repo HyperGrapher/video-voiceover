@@ -17,8 +17,24 @@ struct TimelineViewShell: View {
     @State private var dragStartTimes: [UUID: Double] = [:]
     @State private var dragPreviewStartTimes: [UUID: Double] = [:]
     @State private var mediaDragStartTimings: [UUID: (startTime: Double, duration: Double)] = [:]
+    @State private var mediaDragModes: [UUID: MediaDragMode] = [:]
     @State private var mediaPreviewTimings: [UUID: (startTime: Double, duration: Double)] = [:]
     @State private var isDraggingClip = false
+
+    private enum MediaDragMode {
+        case move
+        case trimLeading
+        case trimTrailing
+
+        var isTrimming: Bool {
+            switch self {
+            case .trimLeading, .trimTrailing:
+                true
+            case .move:
+                false
+            }
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -369,6 +385,9 @@ struct TimelineViewShell: View {
 
     private func mediaClip(_ clip: MediaClip, track: TrackDescriptor, timelineWidth: CGFloat) -> some View {
         let previewTiming = mediaPreviewTimings[clip.id]
+        let dragMode = mediaDragModes[clip.id]
+        let isMoving = dragMode == .move
+        let isTrimming = dragMode?.isTrimming == true
         let displayClip = previewTiming.map { clip.withTiming(startTime: $0.startTime, duration: $0.duration) } ?? clip
         let originalX = xPosition(for: clip.startTime, width: timelineWidth)
         let originalWidth = max(80, durationWidth(clip.duration, width: timelineWidth))
@@ -383,11 +402,11 @@ struct TimelineViewShell: View {
                 track: track,
                 width: originalWidth,
                 timelineWidth: timelineWidth,
-                showsHandles: previewTiming == nil
+                showsHandles: previewTiming == nil || isTrimming,
+                allowsMove: previewTiming == nil || isMoving
             )
             .opacity(previewTiming == nil ? 1 : 0.32)
             .offset(x: originalX)
-            .highPriorityGesture(mediaMoveGesture(for: clip, track: track, timelineWidth: timelineWidth))
 
             if let previewX, let previewWidth {
                 mediaClipBlock(
@@ -396,7 +415,8 @@ struct TimelineViewShell: View {
                     track: track,
                     width: previewWidth,
                     timelineWidth: timelineWidth,
-                    showsHandles: false
+                    showsHandles: isTrimming,
+                    allowsMove: false
                 )
                 .opacity(0.82)
                 .offset(x: previewX)
@@ -427,22 +447,22 @@ struct TimelineViewShell: View {
         track: TrackDescriptor,
         width: CGFloat,
         timelineWidth: CGFloat,
-        showsHandles: Bool
+        showsHandles: Bool,
+        allowsMove: Bool
     ) -> some View {
         RoundedRectangle(cornerRadius: 6)
             .fill(Color(hex: track.colour).opacity(track.muted ? 0.28 : 0.64))
             .frame(width: width, height: 36)
-            .overlay(alignment: .leading) {
-                HStack(spacing: 8) {
-                    WaveformStrip(color: .white.opacity(0.42))
-                        .frame(width: max(24, width * 0.45))
-                    Text(title)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 10)
+            .overlay {
+                mediaClipMoveBody(
+                    title: title,
+                    clip: clip,
+                    track: track,
+                    width: max(1, width - (showsHandles ? 28 : 0)),
+                    timelineWidth: timelineWidth,
+                    allowsMove: allowsMove
+                )
+                .padding(.horizontal, showsHandles ? 14 : 10)
             }
             .overlay(alignment: .leading) {
                 if showsHandles {
@@ -456,22 +476,60 @@ struct TimelineViewShell: View {
             }
     }
 
+    @ViewBuilder
+    private func mediaClipMoveBody(
+        title: String,
+        clip: MediaClip,
+        track: TrackDescriptor,
+        width: CGFloat,
+        timelineWidth: CGFloat,
+        allowsMove: Bool
+    ) -> some View {
+        let content = HStack(spacing: 8) {
+            WaveformStrip(color: .white.opacity(0.42))
+                .frame(width: max(24, width * 0.45))
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .frame(width: width, height: 36)
+        .contentShape(Rectangle())
+
+        if allowsMove {
+            content.highPriorityGesture(mediaMoveGesture(for: clip, track: track, timelineWidth: timelineWidth))
+        } else {
+            content
+        }
+    }
+
     private enum MediaTrimEdge {
         case leading
         case trailing
+
+        var dragMode: MediaDragMode {
+            switch self {
+            case .leading:
+                .trimLeading
+            case .trailing:
+                .trimTrailing
+            }
+        }
     }
 
     private func mediaTrimHandle(edge: MediaTrimEdge, clip: MediaClip, track: TrackDescriptor, timelineWidth: CGFloat) -> some View {
         Rectangle()
             .fill(.white.opacity(0.70))
-            .frame(width: 6, height: 34)
-            .contentShape(Rectangle().inset(by: -5))
+            .frame(width: 10, height: 34)
+            .contentShape(Rectangle())
             .highPriorityGesture(
                 DragGesture(minimumDistance: 2)
                     .onChanged { value in
                         guard !track.locked else { return }
                         if mediaDragStartTimings[clip.id] == nil {
                             mediaDragStartTimings[clip.id] = (clip.startTime, clip.duration)
+                            mediaDragModes[clip.id] = edge.dragMode
                             isDraggingClip = true
                         }
                         let startTiming = mediaDragStartTimings[clip.id] ?? (clip.startTime, clip.duration)
@@ -491,6 +549,7 @@ struct TimelineViewShell: View {
                             )
                         }
                         mediaDragStartTimings[clip.id] = nil
+                        mediaDragModes[clip.id] = nil
                         mediaPreviewTimings[clip.id] = nil
                         isDraggingClip = false
                     }
@@ -503,6 +562,7 @@ struct TimelineViewShell: View {
                 guard !track.locked else { return }
                 if mediaDragStartTimings[clip.id] == nil {
                     mediaDragStartTimings[clip.id] = (clip.startTime, clip.duration)
+                    mediaDragModes[clip.id] = .move
                     isDraggingClip = true
                 }
                 let startTiming = mediaDragStartTimings[clip.id] ?? (clip.startTime, clip.duration)
@@ -521,6 +581,7 @@ struct TimelineViewShell: View {
                     )
                 }
                 mediaDragStartTimings[clip.id] = nil
+                mediaDragModes[clip.id] = nil
                 mediaPreviewTimings[clip.id] = nil
                 isDraggingClip = false
             }
