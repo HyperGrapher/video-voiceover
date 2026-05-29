@@ -638,3 +638,252 @@ These decisions are already made in `AGENTS.md` and must not be reversed:
 - Timeline markers / chapter points.
 - Multi-camera or B-roll tracks.
 - Undo/redo stack (desired future work, not in this PRD).
+
+
+# How to reduce risks
+
+This redesign should be implemented phase by phase. Do **not** start by rebuilding the full UI. The safest path is to first stabilize the project model and the audio/timeline architecture, then connect the UI once the core behavior is proven.
+
+The highest-risk area is the live audio engine: `AVAudioEngine`, multi-node scheduling, multi-track playback, seek behavior, and synchronization with `AVPlayer`. Timeline UI work is still complex, but it is lower risk because most UI problems are visible immediately. Audio timing bugs are harder to detect because they can appear as small offsets, drift, glitches, or broken node state after seeking.
+
+---
+
+## 1. Build the data model first
+
+Before redesigning the UI, add the new project structure:
+
+- Tracks
+- Clips
+- Export settings
+- Subtitle events
+- Audio settings
+- Backward-compatible defaults
+
+The old project format should still load correctly. Existing data such as `videoURL` and narrations should migrate into the new model automatically:
+
+- `videoURL` becomes a video track
+- Existing narrations become narration clips
+- A default narration track is created if needed
+- Missing new fields receive safe defaults
+
+This prevents the UI from being built on temporary state that will later need to be replaced.
+
+---
+
+## 2. Use one source of truth
+
+Preview and export must read from the same track/clip model.
+
+Avoid duplicate hidden state such as separate preview-only clips, export-only timing, or UI-only audio settings. The timeline, preview player, audio engine, subtitle system, and FFmpeg export should all consume the same project model.
+
+This reduces the risk of bugs where preview looks correct but export is different.
+
+---
+
+## 3. Add a render/playback plan layer
+
+Before preview or export, generate a plain intermediate structure, for example:
+
+```swift
+struct PlaybackPlan {
+    let activeClips: [ResolvedClip]
+    let startTime: TimeInterval
+    let endTime: TimeInterval
+    let volumes: [TrackID: Double]
+    let subtitleEvents: [SubtitleEvent]
+    let audioRoutes: [AudioRoute]
+}
+```
+
+The render/playback plan should resolve:
+
+- Which clips are active
+- Clip start and end times
+- Track volume
+- Clip volume
+- Mute/solo state
+- Subtitle timing
+- Audio routing
+- Export-sidecar behavior
+
+Both preview and export should consume this plan. This makes the system easier to debug because the app can print or inspect the plan before playback/export starts.
+
+---
+
+## 4. Build the audio engine in isolation first
+
+Before wiring the real timeline UI to live audio, create a small standalone Swift test harness, such as a simple `NSWindowController` with basic buttons.
+
+The harness should prove that the audio engine can handle:
+
+- One narration clip at an arbitrary start time
+- Two narration clips with correct offsets relative to `AVPlayer`
+- Seeking to any timeline position
+- Rescheduling clips correctly after seek
+- Starting playback from the middle of a clip
+- Mute, solo, and volume changes without graph crashes or glitches
+
+Do not depend on SwiftUI view updates for this test. The goal is to prove the audio engine independently.
+
+---
+
+## 5. Keep the audio engine decoupled from SwiftUI
+
+Create an `AudioMixEngine` as a plain Swift class with its own internal state.
+
+The UI should call explicit methods such as:
+
+```swift
+audioMixEngine.play()
+audioMixEngine.pause()
+audioMixEngine.seek(to: time)
+audioMixEngine.setTrackMuted(trackID, true)
+audioMixEngine.setTrackVolume(trackID, volume)
+```
+
+The engine should not directly observe `@Published` properties or depend on SwiftUI view redraws. This avoids accidental graph changes during view updates and makes the engine easier to test.
+
+---
+
+## 6. Treat `AVPlayer` as the ground-truth clock
+
+Use one `AVPlayer` as the master timeline clock.
+
+Every audio node offset should be calculated from the current player time:
+
+```swift
+nodeStartOffset = clipStartTime - currentPlayerTime
+```
+
+On every seek, prefer the simple and reliable approach:
+
+1. Stop scheduled audio.
+2. Clear pending buffers.
+3. Read the current `AVPlayer` time.
+4. Rebuild the playback plan.
+5. Reschedule clips from scratch.
+
+Do not try to optimize with partial rescheduling at first. Correctness is more important than cleverness.
+
+---
+
+## 7. Implement audio complexity in small layers
+
+Add audio features in this exact order, with each step acting as a merge gate:
+
+1. Single narration clip, no seek
+2. Single narration clip with seek support
+3. Multiple narration clips on one track
+4. Narration plus music/SFX clips
+5. Mute, solo, and volume
+6. Fade-in and fade-out
+7. Looping
+
+Do not move to the next step until the current one is proven. If something breaks, this makes it clear which feature introduced the regression.
+
+---
+
+## 8. Build timeline UI with a mock audio engine first
+
+The timeline UI can be developed against a `MockAudioEngine` before the real audio engine is connected.
+
+The mock engine should print or log actions such as:
+
+- Play
+- Pause
+- Seek
+- Clip moved
+- Clip trimmed
+- Track muted
+- Volume changed
+
+This allows the timeline UI, drag behavior, snapping, headers, inspectors, selection, and project model updates to be built without debugging live audio at the same time.
+
+---
+
+## 9. Pre-render expensive visual assets
+
+Waveforms and thumbnails should be generated once and cached.
+
+Do not recalculate waveform or thumbnail data during timeline drawing or scrolling. Timeline rendering should only read prepared lightweight display data.
+
+Cacheable assets include:
+
+- Audio waveforms
+- Video thumbnails
+- Clip preview frames
+- Subtitle layout previews if needed
+
+This keeps the timeline responsive as project complexity grows.
+
+---
+
+## 10. Write timing accuracy tests
+
+Add tests that verify actual playback timing, not just whether audio plays.
+
+Use an `AVAudioEngine` tap or another measurement mechanism to record when clips actually start, then compare that against the expected timeline time.
+
+Suggested threshold:
+
+```swift
+abs(actualStartTime - expectedStartTime) < 0.020
+```
+
+A 20ms threshold is a reasonable starting point for detecting sync problems that may not be obvious during casual listening but can still break subtitle alignment.
+
+Test cases should include:
+
+- 0 clips
+- 1 narration clip
+- 3 narration clips
+- Overlapping clips
+- Music plus narration
+- Muted original audio
+- Seek into the middle of a clip
+- Export with sidecars
+
+---
+
+## 11. Keep FFmpeg export last
+
+FFmpeg export is lower risk than the live preview engine because export is deterministic and can be tested from generated fixtures.
+
+Implement it after:
+
+1. The project model is stable
+2. The render/playback plan exists
+3. The audio engine behavior is validated
+4. Timeline UI edits correctly update the model
+
+Export should use the same resolved plan as preview, so preview and final render stay consistent.
+
+---
+
+## 12. Suggested implementation priority
+
+| Priority | Task | Risk | Notes |
+|---|---|---|---|
+| 1 | Project data model migration | High | Must happen before full UI redesign |
+| 2 | Playback/render plan | High | Shared by preview and export |
+| 3 | AudioMixEngine isolation harness | High | Prove sync, seek, mute, solo, volume |
+| 4 | Clock sync and seek correctness | High | `AVPlayer` should be the source of truth |
+| 5 | Timeline UI with mock audio | Medium | Can be built in parallel |
+| 6 | Connect UI to real audio engine | Medium | Only after both sides are stable |
+| 7 | Waveform/thumbnail caching | Medium | Needed for timeline performance |
+| 8 | FFmpeg multi-track export | Low/Medium | Implement after plan/model are stable |
+
+---
+
+## Coding agent instruction
+
+Start with the data model and migration layer. Then add the playback/render plan. In parallel, build the timeline UI against a mock audio engine and build the real `AudioMixEngine` in an isolated harness.
+
+Do not wire the real audio engine directly into the full SwiftUI timeline until:
+
+- The model migration works
+- The playback/render plan is inspectable
+- The isolated audio harness passes seek and sync tests
+- The timeline UI works with mock audio
+
+The goal is to avoid debugging project migration, timeline UI, live audio, seeking, and export behavior all at the same time.

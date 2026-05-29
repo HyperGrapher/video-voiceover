@@ -12,11 +12,13 @@ final class VideoEditorModel: ObservableObject {
     @Published var isPlaying = false
     @Published var statusMessage = "Import a video to begin arranging."
     @Published var isDropTargeted = false
+    @Published var masterVolume: Double = 0.82
 
     let player = AVPlayer()
     private let supportedVideoExtensions = ["mp4", "mov", "m4v", "mkv", "webm"]
     private var narrationURL: URL?
     private var narrationPlayer: AVAudioPlayer?
+    private var narrationTimelineStart: Double = 0
     var onVideoImported: ((URL) -> Void)?
 
     func importVideo() {
@@ -142,13 +144,13 @@ final class VideoEditorModel: ObservableObject {
         }
     }
 
-    func loadProjectNarration(_ narration: ProjectNarration?) {
-        guard narrationURL != narration?.url else { return }
+    func loadProjectNarration(_ narration: ProjectNarration?, timelineStart: Double = 0) {
+        guard narrationURL != narration?.url || narrationTimelineStart != timelineStart else { return }
 
         narrationPlayer?.stop()
         narrationPlayer = nil
         narrationURL = narration?.url
-        player.isMuted = narration != nil
+        narrationTimelineStart = timelineStart
 
         guard let narration else {
             return
@@ -157,7 +159,7 @@ final class VideoEditorModel: ObservableObject {
         do {
             let audioPlayer = try AVAudioPlayer(contentsOf: narration.url)
             audioPlayer.prepareToPlay()
-            audioPlayer.currentTime = min(max(currentTime, 0), audioPlayer.duration)
+            audioPlayer.currentTime = narrationLocalTime(for: currentTime, duration: audioPlayer.duration) ?? 0
             narrationPlayer = audioPlayer
             statusMessage = "Loaded narration \(narration.url.lastPathComponent)"
         } catch {
@@ -190,6 +192,14 @@ final class VideoEditorModel: ObservableObject {
         seek(to: duration)
     }
 
+    func stepBackward(frameRate: Double = 30) {
+        seek(to: currentTime - 1 / frameRate)
+    }
+
+    func stepForward(frameRate: Double = 30) {
+        seek(to: currentTime + 1 / frameRate)
+    }
+
     func seek(to seconds: Double) {
         let clamped = min(max(seconds, 0), duration)
         currentTime = clamped
@@ -206,6 +216,9 @@ final class VideoEditorModel: ObservableObject {
         guard seconds.isFinite else { return }
 
         currentTime = min(max(seconds, 0), duration)
+        if isPlaying && narrationPlayer?.isPlaying != true {
+            syncNarration(to: currentTime)
+        }
         if isPlaying && duration > 0 && currentTime >= duration {
             narrationPlayer?.stop()
             isPlaying = false
@@ -222,7 +235,7 @@ final class VideoEditorModel: ObservableObject {
         guard let narrationPlayer else { return }
 
         syncNarration(to: currentTime)
-        if currentTime < narrationPlayer.duration {
+        if narrationLocalTime(for: currentTime, duration: narrationPlayer.duration) != nil {
             narrationPlayer.play()
         }
     }
@@ -230,14 +243,22 @@ final class VideoEditorModel: ObservableObject {
     private func syncNarration(to seconds: Double) {
         guard let narrationPlayer else { return }
 
-        let clamped = min(max(seconds, 0), narrationPlayer.duration)
-        narrationPlayer.currentTime = clamped
-        if isPlaying && clamped < narrationPlayer.duration && !narrationPlayer.isPlaying {
+        guard let localTime = narrationLocalTime(for: seconds, duration: narrationPlayer.duration) else {
+            narrationPlayer.pause()
+            narrationPlayer.currentTime = seconds < narrationTimelineStart ? 0 : narrationPlayer.duration
+            return
+        }
+
+        narrationPlayer.currentTime = localTime
+        if isPlaying && !narrationPlayer.isPlaying {
             narrationPlayer.play()
         }
-        if clamped >= narrationPlayer.duration {
-            narrationPlayer.pause()
-        }
+    }
+
+    private func narrationLocalTime(for timelineTime: Double, duration: Double) -> Double? {
+        let localTime = timelineTime - narrationTimelineStart
+        guard localTime >= 0, localTime < duration else { return nil }
+        return min(max(localTime, 0), duration)
     }
 
     private func isSupportedVideo(_ url: URL) -> Bool {
@@ -299,68 +320,62 @@ struct VideoEditorView: View {
     @State private var exportDiagnosticsLog = ""
     @State private var isShowingExportDiagnostics = false
     @State private var shouldReplaceNarrationOnPlace = false
+    @State private var selectedNarrationClipID: UUID?
     private let playbackTimer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
 
+    private var activeNarrationClip: NarrationClip? {
+        if let selectedNarrationClipID,
+           let selectedClip = project.narrationClips.first(where: { $0.id == selectedNarrationClipID }) {
+            return selectedClip
+        }
+
+        return project.narrationClips.sorted { $0.startTime < $1.startTime }.first
+    }
+
     private var activeNarration: ProjectNarration? {
-        project.narrations.first
+        guard let activeNarrationClip else { return project.narrations.first }
+        return project.narrations.first { narration in
+            narration.url.path(percentEncoded: false) == activeNarrationClip.audioFilePath
+        } ?? project.narrations.first
+    }
+
+    private var activeNarrationLocalTime: Double? {
+        guard let activeNarrationClip else { return model.currentTime }
+        let localTime = model.currentTime - activeNarrationClip.startTime
+        guard localTime >= 0, localTime <= activeNarrationClip.duration else { return nil }
+        return localTime
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            editorStatusBar
+            editorTopBar
 
             Divider()
-                .overlay(Color.white.opacity(0.08))
 
             HStack(spacing: 0) {
                 previewSection
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 Divider()
-                    .overlay(Color.white.opacity(0.08))
 
-                SubtitleStylePanel(style: $project.subtitleStyle)
-                    .frame(width: 270)
+                EditorInspectorPanel(project: $project, isRendering: isRendering, exportLog: exportDiagnosticsLog, onExport: renderVideoWithSubtitles)
+                    .frame(width: 360)
             }
-
-            transportBar
 
             TimelineViewShell(
                 model: model,
-                project: project,
+                project: $project,
+                onAddNarration: {
+                    shouldReplaceNarrationOnPlace = false
+                    isShowingNarration = true
+                },
                 onReplaceNarration: replaceNarrationFromTimeline,
                 onDeleteNarration: deleteNarrationFromTimeline
             )
-                .frame(height: 260)
+                .frame(minHeight: 260, idealHeight: 320)
         }
-        .foregroundStyle(.white)
-        .background(Color(red: 0.105, green: 0.105, blue: 0.112))
-        .toolbar {
-            ToolbarItemGroup(placement: .navigation) {
-                Button(action: onCloseProject) {
-                    Label("Projects", systemImage: "chevron.left")
-                }
-            }
-
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button(action: model.importVideo) {
-                    Label("Import Video", systemImage: "plus")
-                }
-
-                Button(action: {
-                    shouldReplaceNarrationOnPlace = false
-                    isShowingNarration = true
-                }) {
-                    Label("Add Narration", systemImage: "waveform.and.mic")
-                }
-
-                Button(action: renderVideoWithSubtitles) {
-                    Label(isRendering ? "Rendering" : "Render", systemImage: isRendering ? "hourglass" : "square.and.arrow.up")
-                }
-                .disabled(isRendering || project.videoURL == nil || project.narrations.isEmpty)
-                .help(renderButtonHelp)
-            }
-        }
+        .foregroundStyle(.primary)
+        .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $isShowingNarration) {
             SpeechNarrationView(onPlaceRecording: placeNarrationIntoTrack)
                 .environmentObject(backend)
@@ -372,35 +387,111 @@ struct VideoEditorView: View {
             model.onVideoImported = { url in
                 project.videoURL = url
             }
+            model.player.isMuted = project.videoAudioMuted
+            model.player.volume = project.videoAudioVolume * Float(model.masterVolume)
             model.loadProjectVideo(project.videoURL)
-            model.loadProjectNarration(activeNarration)
+            loadActiveNarrationIntoModel()
         }
         .onChange(of: project.videoURL) { _, newURL in
             model.loadProjectVideo(newURL)
         }
         .onChange(of: project.narrations) { _, _ in
-            model.loadProjectNarration(activeNarration)
+            loadActiveNarrationIntoModel()
+        }
+        .onChange(of: project.narrationClips) { _, _ in
+            loadActiveNarrationIntoModel()
         }
         .onReceive(playbackTimer) { _ in
             model.syncCurrentTimeFromPlayer()
         }
+        .onChange(of: model.masterVolume) { _, newValue in
+            model.player.volume = project.videoAudioVolume * Float(newValue)
+        }
+        .onChange(of: project.videoAudioMuted) { _, newValue in
+            model.player.isMuted = newValue
+        }
+        .onChange(of: project.videoAudioVolume) { _, newValue in
+            model.player.volume = newValue * Float(model.masterVolume)
+        }
     }
 
-    private var editorStatusBar: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(project.name)
-                .font(.headline)
-                .lineLimit(1)
-            Text(editorStatusLine)
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.58))
-                .lineLimit(1)
+    private var editorTopBar: some View {
+        HStack(spacing: 16) {
+            Button(action: onCloseProject) {
+                Image(systemName: "chevron.left")
+            }
+            .buttonStyle(.borderless)
+            .help("Back to projects")
+
+            HStack(spacing: 8) {
+                Text(project.name)
+                    .font(.headline)
+                    .lineLimit(1)
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 7, height: 7)
+            }
+            .padding(.horizontal, 14)
+            .frame(width: 260, height: 34, alignment: .leading)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(.separator.opacity(0.8))
+            }
+
+            Spacer()
+
+            HStack(spacing: 24) {
+                Button(action: model.jumpToStart) { Image(systemName: "backward.end.fill") }
+                Button(action: { model.stepBackward() }) { Image(systemName: "backward.fill") }
+                Button(action: model.togglePlayback) {
+                    Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.title2)
+                        .frame(width: 26)
+                }
+                Button(action: { model.stepForward() }) { Image(systemName: "forward.fill") }
+                Button(action: model.jumpToEnd) { Image(systemName: "forward.end.fill") }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 28)
+            .frame(height: 42)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(.separator.opacity(0.7))
+            }
+            .disabled(model.selectedVideoURL == nil)
+
+            Spacer()
+
+            HStack(spacing: 10) {
+                Image(systemName: "speaker.wave.2.fill")
+                Slider(value: $model.masterVolume, in: 0...2)
+                    .frame(width: 150)
+                Text("\(Int((model.masterVolume * 100).rounded()))%")
+                    .font(.system(.callout, design: .monospaced))
+                    .frame(width: 44, alignment: .trailing)
+            }
+
+            Button(action: renderVideoWithSubtitles) {
+                Label("Export", systemImage: "square.and.arrow.up")
+            }
+            .disabled(isRendering || project.videoURL == nil || project.narrationClips.isEmpty)
+            .help(renderButtonHelp)
+
+            if isRendering {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 20)
+            } else {
+                Image(systemName: "sparkle.magnifyingglass")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 20)
+            }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.leading, 18)
-        .padding(.trailing, 18)
-        .padding(.vertical, 8)
-        .background(Color(red: 0.14, green: 0.13, blue: 0.14))
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .background(.bar)
     }
 
     private var previewSection: some View {
@@ -452,10 +543,10 @@ struct VideoEditorView: View {
                         PlayerPreviewView(player: model.player)
                             .background(Color.black)
 
-                        if let activeNarration {
+                        if let activeNarration, let activeNarrationLocalTime {
                             SubtitlePreviewOverlay(
                                 narration: activeNarration,
-                                currentTime: model.currentTime,
+                                currentTime: activeNarrationLocalTime,
                                 style: project.subtitleStyle,
                                 previewSize: CGSize(width: previewWidth, height: previewHeight)
                             )
@@ -531,7 +622,7 @@ struct VideoEditorView: View {
         if project.videoURL == nil {
             return "Import a video before rendering."
         }
-        if project.narrations.isEmpty {
+        if project.narrationClips.isEmpty {
             return "Generate and place narration before rendering."
         }
         return "Export video with generated narration and word-synced subtitles."
@@ -541,6 +632,7 @@ struct VideoEditorView: View {
         if shouldReplaceNarrationOnPlace {
             project.audioURLs.removeAll { url in project.narrations.contains { $0.url == url } }
             project.narrations.removeAll()
+            project.narrationClips.removeAll()
             shouldReplaceNarrationOnPlace = false
         }
 
@@ -549,8 +641,19 @@ struct VideoEditorView: View {
         }
 
         project.narrations.append(narration)
-        model.loadProjectNarration(narration)
-        renderMessage = "Narration placed into audio/subtitle tracks"
+        let narrationTrack = project.tracks.first(where: { $0.type == .narration }) ?? project.addTrack(type: .narration)
+        var clip = NarrationClip(
+            trackId: narrationTrack.id,
+            startTime: model.currentTime,
+            audioFilePath: narration.url.path(percentEncoded: false),
+            text: narration.transcript,
+            words: WordTiming.words(for: narration, style: project.subtitleStyle)
+        )
+        clip.startTime = project.autoNudgedStart(for: clip)
+        project.addNarrationClip(clip)
+        selectedNarrationClipID = clip.id
+        model.loadProjectNarration(narration, timelineStart: clip.startTime)
+        renderMessage = "Narration placed at \(formatTimecode(clip.startTime))"
         isShowingNarration = false
     }
 
@@ -562,9 +665,15 @@ struct VideoEditorView: View {
     private func deleteNarrationFromTimeline() {
         let narrationURLs = Set(project.narrations.map(\.url))
         project.narrations.removeAll()
+        project.narrationClips.removeAll()
         project.audioURLs.removeAll { narrationURLs.contains($0) }
         model.loadProjectNarration(nil)
+        selectedNarrationClipID = nil
         renderMessage = "Removed narration from audio/subtitle tracks"
+    }
+
+    private func loadActiveNarrationIntoModel() {
+        model.loadProjectNarration(activeNarration, timelineStart: activeNarrationClip?.startTime ?? 0)
     }
 
     private func renderVideoWithSubtitles() {
@@ -573,7 +682,7 @@ struct VideoEditorView: View {
             return
         }
 
-        guard let narration = activeNarration else {
+        guard let narration = activeNarration, !project.narrationClips.isEmpty else {
             renderMessage = "Generate and place narration before rendering"
             return
         }
@@ -882,25 +991,398 @@ private extension Color {
     }
 }
 
-struct TimelineViewShell: View {
-    @ObservedObject var model: VideoEditorModel
-    let project: SpeechAppProject
-    let onReplaceNarration: () -> Void
-    let onDeleteNarration: () -> Void
+enum InspectorTab: String, CaseIterable, Identifiable {
+    case clip
+    case subtitles
+    case audioMix
+    case appearance
+    case export
 
-    private let labelColumnWidth: CGFloat = 84
-    private let rulerHeight: CGFloat = 34
-    private let trackHeight: CGFloat = 62
-    private let tracks = [
-        ("Video", "film", Color(red: 0.18, green: 0.34, blue: 0.54)),
-        ("Audio", "waveform", Color(red: 0.19, green: 0.40, blue: 0.30)),
-        ("Subtitles", "text.bubble", Color(red: 0.34, green: 0.25, blue: 0.46))
-    ]
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .clip: "Clip"
+        case .subtitles: "Subtitles"
+        case .audioMix: "Audio Mix"
+        case .appearance: "Appearance"
+        case .export: "Export"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .clip: "film"
+        case .subtitles: "captions.bubble.fill"
+        case .audioMix: "waveform"
+        case .appearance: "paintbrush"
+        case .export: "square.and.arrow.up"
+        }
+    }
+}
+
+struct EditorInspectorPanel: View {
+    @Binding var project: SpeechAppProject
+    let isRendering: Bool
+    let exportLog: String
+    let onExport: () -> Void
+
+    @State private var selectedTab: InspectorTab = .subtitles
+    @State private var isShowingExportLog = false
 
     var body: some View {
         VStack(spacing: 0) {
+            HStack(spacing: 18) {
+                ForEach(InspectorTab.allCases) { tab in
+                    Button(action: { selectedTab = tab }) {
+                        VStack(spacing: 3) {
+                            Image(systemName: tab.icon)
+                                .font(.system(size: 21))
+                            Text(tab.title)
+                                .font(.caption2)
+                        }
+                        .foregroundStyle(selectedTab == tab ? Color.accentColor : .primary)
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.plain)
+                    .help(tab.title)
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    switch selectedTab {
+                    case .clip:
+                        clipTab
+                    case .subtitles:
+                        subtitlesTab
+                    case .audioMix:
+                        audioMixTab
+                    case .appearance:
+                        appearanceTab
+                    case .export:
+                        exportTab
+                    }
+                }
+                .padding(18)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var clipTab: some View {
+        Group {
+            if let clip = project.narrationClips.first {
+                LabeledContent("Clip name") {
+                    Text("Narration")
+                }
+                LabeledContent("Start time") {
+                    Text(formatTimecode(clip.startTime))
+                        .font(.system(.body, design: .monospaced))
+                }
+                LabeledContent("Duration") {
+                    Text(formatTimecode(clip.duration))
+                        .font(.system(.body, design: .monospaced))
+                }
+                TextEditor(text: .constant(clip.text))
+                    .font(.body)
+                    .frame(minHeight: 120)
+                    .disabled(true)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6).stroke(.separator)
+                    }
+            } else {
+                ContentUnavailableView("No Selection", systemImage: "cursorarrow.click", description: Text("Select a clip in the timeline to edit it."))
+                    .frame(maxWidth: .infinity, minHeight: 220)
+            }
+        }
+    }
+
+    private var subtitlesTab: some View {
+        Group {
+            Picker("Timing Mode", selection: $project.subtitleStyle.timingMode) {
+                ForEach(SubtitleTimingMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            Toggle("Word Highlighting", isOn: $project.subtitleStyle.isWordHighlightingEnabled)
+            LabeledContent("Timing Offset") {
+                HStack {
+                    Slider(value: $project.subtitleStyle.timingOffset, in: -0.5...0.5, step: 0.01)
+                    Text(String(format: "%+.0f ms", project.subtitleStyle.timingOffset * 1000))
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(width: 58, alignment: .trailing)
+                }
+            }
+            Picker("Subtitle Position", selection: $project.subtitleStyle.bottomMargin) {
+                Text("Bottom").tag(58.0)
+                Text("Top").tag(900.0)
+                Text("Custom").tag(project.subtitleStyle.bottomMargin)
+            }
+            Stepper(value: $project.subtitleStyle.maxWordsPerLine, in: 1...8) {
+                LabeledContent("Max words per event", value: "\(project.subtitleStyle.maxWordsPerLine)")
+            }
+            Picker("Line break mode", selection: .constant("fit")) {
+                Text("Fit to line-length").tag("fit")
+                Text("Fixed word count").tag("fixed")
+            }
+            Toggle("Preview overlay", isOn: .constant(true))
+            Text("Settings apply to auto-generated subtitles and can be overridden per event in the timeline.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var audioMixTab: some View {
+        HStack(alignment: .bottom, spacing: 14) {
+            ForEach($project.tracks) { $track in
+                if track.type != .subtitleOverride {
+                    MixerStrip(track: $track)
+                }
+            }
+            VStack(spacing: 8) {
+                Text("Master")
+                    .font(.caption.weight(.semibold))
+                Slider(value: .constant(1.0), in: 0...2)
+                    .rotationEffect(.degrees(-90))
+                    .frame(width: 42, height: 150)
+                Text("100%")
+                    .font(.caption2.monospacedDigit())
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var appearanceTab: some View {
+        Group {
+            Text("Welcome to SpeechApp")
+                .font(.system(size: min(project.subtitleStyle.fontSize / 2, 34), weight: .heavy, design: .rounded))
+                .foregroundStyle(Color(hex: project.subtitleStyle.activeWordColorHex))
+                .padding(14)
+                .frame(maxWidth: .infinity)
+                .background(.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 8))
+
+            SliderRow(title: "Font size", value: $project.subtitleStyle.fontSize, range: 12...96, suffix: " pt")
+            ColorPicker("Primary colour", selection: colorBinding(for: \.activeWordColorHex), supportsOpacity: false)
+            ColorPicker("Secondary colour", selection: colorBinding(for: \.textColorHex), supportsOpacity: false)
+            ColorPicker("Outline colour", selection: colorBinding(for: \.outlineColorHex), supportsOpacity: false)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 8)], spacing: 8) {
+                presetButton("Clean White", active: "#FFD84D", text: "#FFFFFF", size: 54, margin: 58)
+                presetButton("TikTok Yellow", active: "#FFF200", text: "#FFFFFF", size: 62, margin: 70)
+                presetButton("Bold Meme", active: "#FFFFFF", text: "#FFFFFF", size: 76, margin: 34)
+                presetButton("Minimal Lower Third", active: "#FFFFFF", text: "#F4F4F4", size: 38, margin: 96)
+                presetButton("Dark Pill", active: "#FFD84D", text: "#FFFFFF", size: 50, margin: 58)
+            }
+        }
+    }
+
+    private var exportTab: some View {
+        Group {
+            LabeledContent("Output directory") {
+                Text(project.exportSettings.outputDirectory)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            TextField("Filename template", text: $project.exportSettings.filenameTemplate)
+            Picker("Video codec", selection: $project.exportSettings.videoCodec) {
+                Text("H.264").tag(VideoCodec.h264)
+                Text("H.265").tag(VideoCodec.h265)
+                Text("ProRes 422").tag(VideoCodec.prores422)
+            }
+            Picker("Audio codec", selection: $project.exportSettings.audioCodec) {
+                Text("AAC 192kbps").tag(AudioCodec.aac192)
+                Text("AAC 256kbps").tag(AudioCodec.aac256)
+                Text("PCM").tag(AudioCodec.pcm)
+            }
+            Toggle("Include subtitles", isOn: $project.exportSettings.includeSubtitles)
+            Toggle(".ass sidecar", isOn: $project.exportSettings.sidecarArtifacts.ass)
+            Toggle("words.json sidecar", isOn: $project.exportSettings.sidecarArtifacts.wordsJson)
+            Toggle("metadata sidecar", isOn: $project.exportSettings.sidecarArtifacts.metadata)
+            Button(action: onExport) {
+                Label(isRendering ? "Exporting" : "Export", systemImage: "square.and.arrow.up")
+            }
+            .buttonStyle(.borderedProminent)
+            DisclosureGroup("Export Log", isExpanded: $isShowingExportLog) {
+                Text(exportLog.isEmpty ? "No export has run yet." : exportLog)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(exportLog.lowercased().contains("error") ? .red : .secondary)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    private func colorBinding(for keyPath: WritableKeyPath<SubtitleStyleSettings, String>) -> Binding<Color> {
+        Binding(
+            get: { Color(hex: project.subtitleStyle[keyPath: keyPath]) },
+            set: { project.subtitleStyle[keyPath: keyPath] = $0.hexString() }
+        )
+    }
+
+    private func presetButton(_ title: String, active: String, text: String, size: Double, margin: Double) -> some View {
+        Button(title) {
+            project.subtitleStyle.activeWordColorHex = active
+            project.subtitleStyle.textColorHex = text
+            project.subtitleStyle.fontSize = size
+            project.subtitleStyle.bottomMargin = margin
+        }
+    }
+}
+
+struct TrackHeaderView: View {
+    @Binding var track: TrackDescriptor
+    @Binding var videoAudioMuted: Bool
+    @Binding var videoAudioVolume: Float
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Rectangle()
+                .fill(Color(hex: track.colour))
+                .frame(width: 14, height: 14)
+                .cornerRadius(3)
+            Text(track.name)
+                .font(.callout)
+                .lineLimit(1)
+            Spacer()
+            if track.type == .video {
+                Button(action: { videoAudioMuted.toggle() }) {
+                    Image(systemName: videoAudioMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                }
+                .buttonStyle(.borderless)
+                .help("Mute original audio")
+                Button(action: { track.hidden.toggle() }) {
+                    Image(systemName: track.hidden ? "eye.slash" : "eye")
+                }
+                .buttonStyle(.borderless)
+                Button(action: { track.locked.toggle() }) {
+                    Image(systemName: track.locked ? "lock.fill" : "lock")
+                }
+                .buttonStyle(.borderless)
+                Text("\(Int(videoAudioVolume * 100))%")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 38, alignment: .trailing)
+            } else {
+                Button("M") { track.muted.toggle() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                if track.type != .subtitleOverride {
+                    Button("S") { track.solo.toggle() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
+                Button(action: { track.hidden.toggle() }) {
+                    Image(systemName: track.hidden ? "eye.slash" : "eye")
+                }
+                .buttonStyle(.borderless)
+                Button(action: { track.locked.toggle() }) {
+                    Image(systemName: track.locked ? "lock.fill" : "lock")
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+struct MixerStrip: View {
+    @Binding var track: TrackDescriptor
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Rectangle()
+                .fill(Color(hex: track.colour))
+                .frame(width: 26, height: 5)
+            Text(track.name)
+                .font(.caption2)
+                .lineLimit(1)
+                .frame(width: 54)
+            Slider(value: Binding(
+                get: { Double(track.volume) },
+                set: { track.volume = Float($0) }
+            ), in: 0...2)
+            .rotationEffect(.degrees(-90))
+            .frame(width: 42, height: 140)
+            Text("\(Int(track.volume * 100))%")
+                .font(.caption2.monospacedDigit())
+            HStack(spacing: 4) {
+                Button("M") { track.muted.toggle() }
+                Button("S") { track.solo.toggle() }
+            }
+            .controlSize(.mini)
+        }
+        .frame(width: 62)
+    }
+}
+
+struct SliderRow: View {
+    let title: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let suffix: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text("\(Int(value.rounded()))\(suffix)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: $value, in: range, step: 1)
+        }
+    }
+}
+
+struct WaveformStrip: View {
+    let color: Color
+
+    var body: some View {
+        Canvas { context, size in
+            let count = max(24, Int(size.width / 8))
+            let spacing: CGFloat = 3
+            let width = max(2, (size.width - spacing * CGFloat(count - 1)) / CGFloat(count))
+            for index in 0..<count {
+                let normalized = 0.25 + 0.75 * abs(sin(Double(index) * 0.73))
+                let height = max(3, size.height * normalized)
+                let rect = CGRect(
+                    x: CGFloat(index) * (width + spacing),
+                    y: (size.height - height) / 2,
+                    width: width,
+                    height: height
+                )
+                context.fill(Path(roundedRect: rect, cornerRadius: width / 2), with: .color(color))
+            }
+        }
+    }
+}
+
+struct TimelineViewShell: View {
+    @ObservedObject var model: VideoEditorModel
+    @Binding var project: SpeechAppProject
+    let onAddNarration: () -> Void
+    let onReplaceNarration: () -> Void
+    let onDeleteNarration: () -> Void
+
+    private let labelColumnWidth: CGFloat = 248
+    private let rulerHeight: CGFloat = 28
+    private let trackHeight: CGFloat = 56
+
+    var body: some View {
+        VStack(spacing: 0) {
+            timelineToolbar
+                .frame(height: 48)
+            Divider()
             GeometryReader { proxy in
                 let timelineWidth = max(proxy.size.width - labelColumnWidth, 1)
+                let canvasHeight = rulerHeight + trackHeight * CGFloat(project.tracks.count)
                 let progress = progressValue
                 let playheadX = labelColumnWidth + timelineWidth * progress
 
@@ -911,25 +1393,15 @@ struct TimelineViewShell: View {
                         ruler(timelineWidth: timelineWidth)
                             .frame(height: rulerHeight)
 
-                        ForEach(Array(tracks.enumerated()), id: \.offset) { index, track in
-                            trackRow(track, index: index, timelineWidth: timelineWidth)
+                        ForEach(project.tracks.sorted(by: { $0.order < $1.order })) { track in
+                            trackRow(track, timelineWidth: timelineWidth)
                                 .frame(height: trackHeight)
                         }
                     }
 
                     playhead
-                        .position(x: playheadX, y: (rulerHeight + trackHeight * CGFloat(tracks.count)) / 2)
+                        .position(x: playheadX, y: canvasHeight / 2)
                 }
-                .contentShape(Rectangle())
-                .onTapGesture { location in
-                    seek(from: location.x, timelineWidth: timelineWidth)
-                }
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            seek(from: value.location.x, timelineWidth: timelineWidth)
-                        }
-                )
                 .onHover { isHovering in
                     if isHovering {
                         NSCursor.resizeLeftRight.push()
@@ -939,153 +1411,243 @@ struct TimelineViewShell: View {
                 }
             }
         }
-        .background(Color(red: 0.08, green: 0.08, blue: 0.085))
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var timelineToolbar: some View {
+        HStack(spacing: 12) {
+            Menu {
+                Button("Add Narration Track") { _ = project.addTrack(type: .narration) }
+                Button("Add Music Track") { _ = project.addTrack(type: .music) }
+                Button("Add Sound FX Track") { _ = project.addTrack(type: .sfx) }
+                Button("Add Subtitle Override Track") { _ = project.addTrack(type: .subtitleOverride) }
+            } label: {
+                Label("Add Track", systemImage: "plus")
+            }
+            .menuStyle(.button)
+
+            Button(action: onAddNarration) {
+                Label("Add Narration", systemImage: "mic.badge.plus")
+            }
+
+            HStack(spacing: 10) {
+                Button(action: {}) { Image(systemName: "scissors") }
+                Button(action: {}) { Image(systemName: "doc.on.doc") }
+                Button(role: .destructive, action: onDeleteNarration) { Image(systemName: "trash") }
+            }
+            .buttonStyle(.borderless)
+
+            if overlapCount > 0 {
+                Label("\(overlapCount) Overlap Warning", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+            }
+
+            Spacer()
+
+            Text("Project Duration: \(formatTimecode(model.duration))")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("30 fps")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Image(systemName: "minus.magnifyingglass")
+            Slider(value: .constant(0.44), in: 0...1)
+                .frame(width: 110)
+            Image(systemName: "plus.magnifyingglass")
+        }
+        .padding(.horizontal, 18)
     }
 
     private var timelineBackground: some View {
         Rectangle()
-            .fill(Color(red: 0.085, green: 0.085, blue: 0.09))
+            .fill(Color(nsColor: .textBackgroundColor))
     }
 
     private func ruler(timelineWidth: CGFloat) -> some View {
         HStack(spacing: 0) {
             Rectangle()
-                .fill(Color(red: 0.095, green: 0.095, blue: 0.10))
+                .fill(Color(nsColor: .windowBackgroundColor))
                 .frame(width: labelColumnWidth)
 
             ZStack(alignment: .topLeading) {
                 Rectangle()
-                    .fill(Color(red: 0.095, green: 0.095, blue: 0.10))
+                    .fill(Color(nsColor: .windowBackgroundColor))
 
-                ForEach(rulerTicks, id: \.self) { second in
+                ForEach(rulerTicks(timelineWidth: timelineWidth), id: \.self) { second in
                     let x = tickX(second: second, width: timelineWidth)
                     VStack(spacing: 3) {
                         Rectangle()
-                            .fill(Color.white.opacity(second.rounded() == second ? 0.38 : 0.18))
-                            .frame(width: 1, height: second.rounded() == second ? 12 : 7)
-                        if second.rounded() == second {
-                            Text("\(Int(second))s")
-                                .font(.caption2)
-                                .foregroundStyle(.white.opacity(0.56))
-                        }
+                            .fill(Color.secondary.opacity(0.42))
+                            .frame(width: 1, height: 12)
+                        Text(formatTimelineTick(second))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                     .position(x: x, y: 17)
                 }
             }
             .frame(width: timelineWidth)
+            .contentShape(Rectangle())
+            .onTapGesture { location in
+                seek(canvasX: location.x, timelineWidth: timelineWidth)
+            }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        seek(canvasX: value.location.x, timelineWidth: timelineWidth)
+                    }
+            )
         }
     }
 
-    private func trackRow(
-        _ track: (String, String, Color),
-        index: Int,
-        timelineWidth: CGFloat
-    ) -> some View {
+    private func trackRow(_ track: TrackDescriptor, timelineWidth: CGFloat) -> some View {
         HStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: track.1)
-                    .frame(width: 18)
-                Text(track.0)
-                    .font(.caption.weight(.medium))
-                    .lineLimit(1)
-                Spacer()
-            }
-            .foregroundStyle(.white.opacity(0.70))
-            .padding(.horizontal, 12)
-            .frame(width: labelColumnWidth)
-            .background(Color(red: 0.105, green: 0.105, blue: 0.112))
+            TrackHeaderView(track: binding(for: track), videoAudioMuted: $project.videoAudioMuted, videoAudioVolume: $project.videoAudioVolume)
+                .frame(width: labelColumnWidth)
 
             ZStack(alignment: .leading) {
                 Rectangle()
-                    .fill(index == 0 ? Color(red: 0.10, green: 0.15, blue: 0.22) : Color(red: 0.105, green: 0.105, blue: 0.11))
+                    .fill(track.type == .video ? Color.blue.opacity(0.04) : Color(nsColor: .textBackgroundColor))
 
-                if shouldShowClip(for: index) {
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(track.2.opacity(index == 0 ? 0.90 : 0.56))
-                        .frame(width: clipWidth(for: index, timelineWidth: timelineWidth), height: 42)
-                        .overlay(alignment: .leading) {
-                            Text(trackTitle(for: index))
-                                .font(.caption)
-                                .foregroundStyle(.white.opacity(0.85))
-                                .lineLimit(1)
-                                .padding(.horizontal, 10)
-                        }
-                        .overlay(alignment: .trailing) {
-                            if index == 1 {
-                                narrationTrackActions
-                                    .padding(.trailing, 8)
-                            } else if index == 2 {
-                                timingBadge
-                                    .padding(.trailing, 10)
-                            }
-                        }
-                        .padding(.horizontal, 0)
+                switch track.type {
+                case .video:
+                    if model.selectedVideoURL != nil {
+                        videoClip(track: track, timelineWidth: timelineWidth)
+                    }
+                case .narration:
+                    ForEach(project.narrationClips.filter { $0.trackId == track.id }) { clip in
+                        narrationClip(clip, track: track, timelineWidth: timelineWidth)
+                    }
+                case .music, .sfx:
+                    mediaPlaceholder(track: track, timelineWidth: timelineWidth)
+                case .subtitleOverride:
+                    subtitleOverridePlaceholder(track: track, timelineWidth: timelineWidth)
                 }
             }
             .overlay(alignment: .bottom) {
                 Rectangle()
-                    .fill(Color.white.opacity(0.06))
+                    .fill(Color.secondary.opacity(0.16))
                     .frame(height: 1)
             }
             .frame(width: timelineWidth)
-        }
-    }
-
-    private var narrationTrackActions: some View {
-        HStack(spacing: 6) {
-            Button(action: onReplaceNarration) {
-                Image(systemName: "arrow.triangle.2.circlepath")
+            .contentShape(Rectangle())
+            .onTapGesture { location in
+                seek(canvasX: location.x, timelineWidth: timelineWidth)
             }
-            .help("Replace narration")
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        seek(canvasX: value.location.x, timelineWidth: timelineWidth)
+                    }
+            )
+        }
+    }
 
-            Button(role: .destructive, action: onDeleteNarration) {
-                Image(systemName: "trash")
+    private func videoClip(track: TrackDescriptor, timelineWidth: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 6)
+            .fill(Color(hex: track.colour).opacity(0.82))
+            .frame(width: timelineWidth - 12, height: 42)
+            .overlay(alignment: .leading) {
+                HStack(spacing: 3) {
+                    ForEach(0..<28, id: \.self) { index in
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(index.isMultiple(of: 2) ? .white.opacity(0.26) : .black.opacity(0.10))
+                            .frame(width: 22, height: 30)
+                    }
+                    Spacer()
+                    Text(model.selectedVideoURL?.lastPathComponent ?? "Video")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.trailing, 10)
+                }
+                .padding(.leading, 8)
             }
-            .help("Delete narration")
-        }
-        .buttonStyle(.borderless)
-        .foregroundStyle(.white.opacity(0.90))
+            .padding(.leading, 10)
     }
 
-    private var timingBadge: some View {
-        Text(project.subtitleStyle.timingMode.title)
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(.white.opacity(0.82))
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(.black.opacity(0.20), in: Capsule())
+    private func narrationClip(_ clip: NarrationClip, track: TrackDescriptor, timelineWidth: CGFloat) -> some View {
+        let x = xPosition(for: clip.startTime, width: timelineWidth)
+        let width = max(96, durationWidth(clip.duration, width: timelineWidth))
+        return RoundedRectangle(cornerRadius: 6)
+            .fill(Color(hex: track.colour).opacity(0.78))
+            .frame(width: width, height: 42)
+            .overlay(alignment: .topLeading) {
+                Text(clip.text.isEmpty ? "Narration" : clip.text)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(Color(hex: track.colour))
+                    .lineLimit(1)
+                    .padding(.horizontal, 10)
+                    .frame(maxWidth: width - 24, alignment: .leading)
+                    .background(.white, in: Capsule())
+                    .padding(8)
+            }
+            .overlay(alignment: .bottom) {
+                WaveformStrip(color: .white.opacity(0.52))
+                    .frame(height: 14)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 5)
+            }
+            .overlay {
+                if !project.narrationOverlaps(for: clip).isEmpty {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(.orange, style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
+                }
+            }
+            .contextMenu {
+                Button("Play Clip") {
+                    model.seek(to: clip.startTime)
+                    model.togglePlayback()
+                }
+                Button("Replace Audio", action: onReplaceNarration)
+                Button(role: .destructive, action: { project.deleteNarrationClip(id: clip.id) }) {
+                    Text("Delete Clip")
+                }
+            }
+            .padding(.leading, x)
     }
 
-    private func shouldShowClip(for trackIndex: Int) -> Bool {
-        switch trackIndex {
-        case 0:
-            return model.selectedVideoURL != nil
-        case 1, 2:
-            return !project.narrations.isEmpty
-        default:
-            return false
-        }
+    private func mediaPlaceholder(track: TrackDescriptor, timelineWidth: CGFloat) -> some View {
+        let sampleWidth = min(timelineWidth * 0.72, 760)
+        return RoundedRectangle(cornerRadius: 6)
+            .fill(Color(hex: track.colour).opacity(track.muted ? 0.18 : 0.34))
+            .frame(width: sampleWidth, height: 32)
+            .overlay {
+                WaveformStrip(color: Color(hex: track.colour).opacity(0.5))
+                    .padding(.horizontal, 10)
+            }
+            .padding(.leading, 64)
+            .opacity(track.muted ? 0.65 : 1)
     }
 
-    private func clipWidth(for trackIndex: Int, timelineWidth: CGFloat) -> CGFloat {
-        guard trackIndex != 0, let narration = project.narrations.first, model.duration > 0 else {
-            return timelineWidth
-        }
-
-        let ratio = min(max(narration.duration / model.duration, 0.04), 1.0)
-        return max(52, timelineWidth * CGFloat(ratio))
+    private func subtitleOverridePlaceholder(track: TrackDescriptor, timelineWidth: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 6)
+            .fill(Color(hex: track.colour).opacity(0.55))
+            .frame(width: min(timelineWidth * 0.38, 420), height: 34)
+            .overlay(alignment: .leading) {
+                Label("Custom subtitle for emphasis", systemImage: "captions.bubble")
+                    .font(.caption)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+            }
+            .padding(.leading, 84)
     }
 
-    private func trackTitle(for trackIndex: Int) -> String {
-        switch trackIndex {
-        case 0:
-            return model.selectedVideoURL?.lastPathComponent ?? "Video"
-        case 1:
-            return project.narrations.first?.url.lastPathComponent ?? "Narration"
-        case 2:
-            return project.narrations.first?.transcript ?? "Word subtitles"
-        default:
-            return "Clip"
+    private func binding(for track: TrackDescriptor) -> Binding<TrackDescriptor> {
+        Binding(
+            get: { project.tracks.first(where: { $0.id == track.id }) ?? track },
+            set: { updatedTrack in
+                guard let index = project.tracks.firstIndex(where: { $0.id == updatedTrack.id }) else { return }
+                project.tracks[index] = updatedTrack
+            }
+        )
+    }
+
+    private var overlapCount: Int {
+        project.narrationClips.reduce(0) { count, clip in
+            count + (project.narrationOverlaps(for: clip).isEmpty ? 0 : 1)
         }
     }
 
@@ -1106,20 +1668,38 @@ struct TimelineViewShell: View {
         return CGFloat(min(max(model.currentTime / model.duration, 0), 1))
     }
 
-    private var rulerTicks: [Double] {
-        let fallbackDuration = max(model.duration, 13)
-        let maxSecond = Int(ceil(fallbackDuration))
-        return Array(0...maxSecond).map(Double.init)
+    private func rulerTicks(timelineWidth: CGFloat) -> [Double] {
+        let duration = max(model.duration, 1)
+        let targetTickCount = max(2, Int(timelineWidth / 96))
+        let rawStep = duration / Double(targetTickCount)
+        let step = niceTickStep(for: rawStep)
+        let maxTick = Int(ceil(duration / step))
+        return (0...maxTick).map { Double($0) * step }.filter { $0 <= duration + step * 0.25 }
     }
 
     private func tickX(second: Double, width: CGFloat) -> CGFloat {
-        let total = max(model.duration, Double(rulerTicks.count - 1), 1)
+        let total = max(model.duration, 1)
         return width * CGFloat(second / total)
     }
 
-    private func seek(from xPosition: CGFloat, timelineWidth: CGFloat) {
+    private func niceTickStep(for rawStep: Double) -> Double {
+        let candidates: [Double] = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
+        return candidates.first { $0 >= rawStep } ?? 900
+    }
+
+    private func xPosition(for seconds: Double, width: CGFloat) -> CGFloat {
+        let total = max(model.duration, 1)
+        return width * CGFloat(seconds / total)
+    }
+
+    private func durationWidth(_ duration: Double, width: CGFloat) -> CGFloat {
+        let total = max(model.duration, duration, 1)
+        return width * CGFloat(duration / total)
+    }
+
+    private func seek(canvasX: CGFloat, timelineWidth: CGFloat) {
         guard model.duration > 0 else { return }
-        let localX = min(max(xPosition - labelColumnWidth, 0), timelineWidth)
+        let localX = min(max(canvasX, 0), timelineWidth)
         model.seek(to: Double(localX / timelineWidth) * model.duration)
     }
 }
@@ -1144,4 +1724,19 @@ private func formatTime(_ seconds: Double) -> String {
     let remainingSeconds = totalSeconds % 60
 
     return String(format: "%02d:%02d:%02d", hours, minutes, remainingSeconds)
+}
+
+private func formatTimecode(_ seconds: Double) -> String {
+    guard seconds.isFinite else { return "00:00.00" }
+
+    let centiseconds = max(Int((seconds * 100).rounded()), 0)
+    let minutes = centiseconds / 6_000
+    let remainingCentiseconds = centiseconds % 6_000
+    let wholeSeconds = remainingCentiseconds / 100
+    let fraction = remainingCentiseconds % 100
+    return String(format: "%02d:%02d.%02d", minutes, wholeSeconds, fraction)
+}
+
+private func formatTimelineTick(_ seconds: Double) -> String {
+    formatTimecode(seconds)
 }
