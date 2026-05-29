@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# bash Scripts/compile_and_run.sh --release-arches="x86_64"
 # Kill running instances, package, relaunch, verify.
 set -euo pipefail
 

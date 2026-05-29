@@ -105,6 +105,55 @@ struct SavedRecording: Identifiable, Hashable {
     var title: String { url.deletingPathExtension().lastPathComponent }
 }
 
+struct WaveformPreview: View {
+    let seed: String
+    let isActive: Bool
+
+    private let barCount = 54
+
+    var body: some View {
+        GeometryReader { proxy in
+            let bars = waveformBars
+            let spacing: CGFloat = 3
+            let width = max(2, (proxy.size.width - spacing * CGFloat(barCount - 1)) / CGFloat(barCount))
+            let midY = proxy.size.height / 2
+
+            Canvas { context, size in
+                var centerLine = Path()
+                centerLine.move(to: CGPoint(x: 0, y: midY))
+                centerLine.addLine(to: CGPoint(x: size.width, y: midY))
+                context.stroke(centerLine, with: .color(.secondary.opacity(0.25)), lineWidth: 1)
+
+                for index in 0..<barCount {
+                    let x = CGFloat(index) * (width + spacing)
+                    let normalized = bars[index]
+                    let height = max(4, normalized * (size.height - 10))
+                    let rect = CGRect(
+                        x: x,
+                        y: midY - height / 2,
+                        width: width,
+                        height: height
+                    )
+                    let path = Path(roundedRect: rect, cornerRadius: width / 2)
+                    context.fill(path, with: .color(isActive ? .accentColor : Color.orange))
+                }
+            }
+        }
+        .background(Color.secondary.opacity(0.16), in: RoundedRectangle(cornerRadius: 6))
+        .accessibilityLabel("Generated narration waveform preview")
+    }
+
+    private var waveformBars: [CGFloat] {
+        var state = UInt64(seed.unicodeScalars.reduce(0) { ($0 &* 31) &+ UInt64($1.value) })
+        return (0..<barCount).map { index in
+            state = state &* 1_664_525 &+ 1_013_904_223 &+ UInt64(index)
+            let random = CGFloat(state % 1_000) / 1_000
+            let envelope = sin((CGFloat(index) / CGFloat(barCount - 1)) * .pi)
+            return 0.18 + (0.28 + random * 0.54) * envelope
+        }
+    }
+}
+
 enum OperationStatus {
     case ready
     case busy
@@ -602,6 +651,8 @@ struct SpeechNarrationView: View {
     @State private var playingRecordingID: URL?
     @State private var previewingVoice: String?
     @State private var isShowingVoicePicker = false
+    @State private var pendingNarration: ProjectNarration?
+    @State private var isPlayingGeneratedPreview = false
 
     private let availableVoices = ["af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky", "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael", "am_onyx", "am_puck", "am_santa", "bf_alice", "bf_emma", "bf_isabella", "bf_lily", "bm_daniel", "bm_fable", "bm_george", "bm_lewis", "ef_dora", "em_alex", "em_santa", "ff_siwis", "hf_alpha", "hf_beta", "hm_omega", "hm_psi", "if_sara", "im_nicola", "jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo", "pf_dora", "pm_alex", "pm_santa", "zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi", "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang"]
 
@@ -625,6 +676,8 @@ struct SpeechNarrationView: View {
             filePlayer?.stop()
             previewPlayer?.stop()
         }
+        .onChange(of: textInput) { _, _ in clearPendingNarration() }
+        .onChange(of: selectedVoice) { _, _ in clearPendingNarration() }
     }
 
     private var startupView: some View {
@@ -666,6 +719,8 @@ struct SpeechNarrationView: View {
             Spacer()
 
             statusView
+
+            footerView
         }
         .padding(24)
     }
@@ -690,16 +745,49 @@ struct SpeechNarrationView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(isBusy || textInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
-                Button("Cancel", action: cancelAndDismiss)
-                    .keyboardShortcut(.cancelAction)
-
                 Spacer()
+            }
 
-                Text("\(textInput.count) chars")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            if let pendingNarration {
+                generatedPreviewView(for: pendingNarration)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
+    }
+
+    private func generatedPreviewView(for narration: ProjectNarration) -> some View {
+        HStack(spacing: 12) {
+            Button(action: { toggleGeneratedPreview(for: narration) }) {
+                Image(systemName: isPlayingGeneratedPreview ? "stop.fill" : "play.fill")
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.borderless)
+            .help(isPlayingGeneratedPreview ? "Stop preview" : "Play preview")
+
+            WaveformPreview(seed: narration.url.lastPathComponent, isActive: isPlayingGeneratedPreview)
+                .frame(height: 54)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.separator.opacity(0.65))
+        }
+    }
+
+    private var footerView: some View {
+        HStack(spacing: 10) {
+            Spacer()
+
+            Button("Cancel", action: cancelAndDismiss)
+                .keyboardShortcut(.cancelAction)
+
+            Button("Insert", action: insertPendingNarration)
+                .buttonStyle(.borderedProminent)
+                .disabled(pendingNarration == nil || isBusy)
+        }
+        .padding(.top, 8)
     }
 
     private var voiceSelector: some View {
@@ -794,18 +882,30 @@ struct SpeechNarrationView: View {
     }
 
     private func startGenerateAction() {
-        if onPlaceRecording != nil {
-            startTrackPlacementGeneration()
-        } else {
-            startFileGeneration()
-        }
+        startFileGeneration()
     }
 
     private func cancelAndDismiss() {
         cancelStreaming()
         fileTask?.cancel()
+        filePlayer?.stop()
         previewPlayer?.stop()
         dismiss()
+    }
+
+    private func insertPendingNarration() {
+        guard let pendingNarration else { return }
+        filePlayer?.stop()
+        isPlayingGeneratedPreview = false
+        onPlaceRecording?(pendingNarration)
+    }
+
+    private func clearPendingNarration() {
+        guard pendingNarration != nil else { return }
+        filePlayer?.stop()
+        filePlayer = nil
+        isPlayingGeneratedPreview = false
+        pendingNarration = nil
     }
 
     private var statusView: some View {
@@ -1034,14 +1134,17 @@ struct SpeechNarrationView: View {
     private func generateSavedSpeech(placeIntoTrack: Bool) async {
         if placeIntoTrack {
             isGeneratingTrackPlacement = true
-            statusMessage = "Generating and placing narration..."
+            statusMessage = "Generating narration preview..."
         } else {
             isGeneratingFile = true
-            statusMessage = "Generating full audio file..."
+            statusMessage = "Generating narration preview..."
         }
         statusKind = .busy
         let transcript = textInput.trimmingCharacters(in: .whitespacesAndNewlines)
         let voice = selectedVoice
+        filePlayer?.stop()
+        isPlayingGeneratedPreview = false
+        pendingNarration = nil
 
         defer {
             fileTask = nil
@@ -1066,8 +1169,8 @@ struct SpeechNarrationView: View {
 
             let fileURL = try saveGeneratedAudio(data)
             loadSavedRecordings()
-            await placeRecordingIfNeeded(fileURL, transcript: transcript, voice: voice, placeIntoTrack: placeIntoTrack)
-            statusMessage = placeIntoTrack ? "Placed \(fileURL.lastPathComponent) into the audio track" : "Saved \(fileURL.lastPathComponent)"
+            pendingNarration = makeProjectNarration(fileURL, transcript: transcript, voice: voice)
+            statusMessage = "Preview ready"
             statusKind = .ready
         } catch is CancellationError {
             statusMessage = "File generation canceled"
@@ -1078,16 +1181,14 @@ struct SpeechNarrationView: View {
         }
     }
 
-    private func placeRecordingIfNeeded(_ fileURL: URL, transcript: String, voice: String, placeIntoTrack: Bool) async {
-        guard placeIntoTrack else { return }
-
+    private func makeProjectNarration(_ fileURL: URL, transcript: String, voice: String) -> ProjectNarration {
         let duration = audioDuration(for: fileURL) ?? 0
-        onPlaceRecording?(ProjectNarration(
+        return ProjectNarration(
             url: fileURL,
             transcript: transcript,
             voice: voice,
             duration: duration
-        ))
+        )
     }
 
     private func makeRequestBody() -> Data? {
@@ -1277,6 +1378,38 @@ struct SpeechNarrationView: View {
             statusKind = .ready
         } catch {
             statusMessage = "Could not play file: \(error.localizedDescription)"
+            statusKind = .error
+        }
+    }
+
+    private func toggleGeneratedPreview(for narration: ProjectNarration) {
+        if isPlayingGeneratedPreview {
+            filePlayer?.stop()
+            filePlayer = nil
+            isPlayingGeneratedPreview = false
+            return
+        }
+
+        do {
+            previewPlayer?.stop()
+            filePlayer?.stop()
+            let player = try AVAudioPlayer(contentsOf: narration.url)
+            let observer = AudioPlaybackObserver()
+            observer.onFinish = {
+                isPlayingGeneratedPreview = false
+                filePlayer = nil
+                playbackObserver = nil
+            }
+            player.delegate = observer
+            player.prepareToPlay()
+            player.play()
+            filePlayer = player
+            playbackObserver = observer
+            isPlayingGeneratedPreview = true
+            statusMessage = "Playing generated preview"
+            statusKind = .ready
+        } catch {
+            statusMessage = "Could not play generated preview: \(error.localizedDescription)"
             statusKind = .error
         }
     }
