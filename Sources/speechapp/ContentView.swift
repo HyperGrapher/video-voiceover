@@ -718,8 +718,6 @@ struct SpeechNarrationView: View {
 
             Spacer()
 
-            statusView
-
             footerView
         }
         .padding(24)
@@ -778,6 +776,8 @@ struct SpeechNarrationView: View {
 
     private var footerView: some View {
         HStack(spacing: 10) {
+            statusView
+
             Spacer()
 
             Button("Cancel", action: cancelAndDismiss)
@@ -916,7 +916,6 @@ struct SpeechNarrationView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
-            Spacer()
         }
         .padding(.vertical, 10)
     }
@@ -1387,6 +1386,8 @@ struct SpeechNarrationView: View {
             filePlayer?.stop()
             filePlayer = nil
             isPlayingGeneratedPreview = false
+            statusMessage = ""
+            statusKind = .ready
             return
         }
 
@@ -1399,6 +1400,8 @@ struct SpeechNarrationView: View {
                 isPlayingGeneratedPreview = false
                 filePlayer = nil
                 playbackObserver = nil
+                statusMessage = ""
+                statusKind = .ready
             }
             player.delegate = observer
             player.prepareToPlay()
