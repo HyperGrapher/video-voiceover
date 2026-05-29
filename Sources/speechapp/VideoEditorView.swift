@@ -1490,6 +1490,7 @@ struct TimelineViewShell: View {
     @State private var trackPendingDeletion: TrackDescriptor?
     @State private var dragStartTimes: [UUID: Double] = [:]
     @State private var dragPreviewStartTimes: [UUID: Double] = [:]
+    @State private var isDraggingClip = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1625,12 +1626,6 @@ struct TimelineViewShell: View {
             .onTapGesture { location in
                 seek(canvasX: location.x, timelineWidth: timelineWidth)
             }
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        seek(canvasX: value.location.x, timelineWidth: timelineWidth)
-                    }
-            )
         }
     }
 
@@ -1744,27 +1739,28 @@ struct TimelineViewShell: View {
             }
             .onTapGesture {
                 selectedNarrationClipID = clip.id
-                model.seek(to: clip.startTime)
             }
-            .gesture(
+            .highPriorityGesture(
                 DragGesture(minimumDistance: 3)
                     .onChanged { value in
                         guard !track.locked else { return }
                         if dragStartTimes[clip.id] == nil {
                             dragStartTimes[clip.id] = clip.startTime
                             selectedNarrationClipID = clip.id
+                            isDraggingClip = true
                         }
                         let secondsDelta = Double(value.translation.width / timelineWidth) * max(model.duration, clip.duration, 1)
                         let proposed = (dragStartTimes[clip.id] ?? clip.startTime) + secondsDelta
-                        dragPreviewStartTimes[clip.id] = snappedStartTime(proposed, for: clip)
+                        dragPreviewStartTimes[clip.id] = clampedStartTime(proposed, for: clip)
                     }
                     .onEnded { _ in
                         if let previewStartTime = dragPreviewStartTimes[clip.id] {
-                            project.moveNarrationClip(id: clip.id, to: previewStartTime)
-                            model.seek(to: previewStartTime)
+                            let committedStartTime = snappedStartTime(previewStartTime, for: clip)
+                            project.moveNarrationClip(id: clip.id, to: committedStartTime)
                         }
                         dragStartTimes[clip.id] = nil
                         dragPreviewStartTimes[clip.id] = nil
+                        isDraggingClip = false
                     }
             )
             .contextMenu {
@@ -1777,8 +1773,11 @@ struct TimelineViewShell: View {
                     Text("Delete Clip")
                 }
             }
-            .padding(.leading, x)
+            .offset(x: x)
             .animation(nil, value: displayStartTime)
+            .transaction { transaction in
+                transaction.animation = nil
+            }
     }
 
     private func mediaPlaceholder(track: TrackDescriptor, timelineWidth: CGFloat) -> some View {
@@ -1883,7 +1882,7 @@ struct TimelineViewShell: View {
 
     private func snappedStartTime(_ proposedStart: Double, for clip: NarrationClip) -> Double {
         let duration = max(model.duration, clip.duration, 1)
-        let snapSeconds = duration * Double(4 / max(1, CGFloat(900)))
+        let snapSeconds = duration * 0.004
         var candidates = [0, model.currentTime]
         candidates.append(contentsOf: project.narrationClips
             .filter { $0.id != clip.id && $0.trackId == clip.trackId }
@@ -1898,8 +1897,13 @@ struct TimelineViewShell: View {
         return max(0, min(nearest, duration))
     }
 
+    private func clampedStartTime(_ proposedStart: Double, for clip: NarrationClip) -> Double {
+        max(0, min(proposedStart, max(model.duration, clip.duration, 1)))
+    }
+
     private func seek(canvasX: CGFloat, timelineWidth: CGFloat) {
         guard model.duration > 0 else { return }
+        guard !isDraggingClip else { return }
         let localX = min(max(canvasX, 0), timelineWidth)
         model.seek(to: Double(localX / timelineWidth) * model.duration)
     }
