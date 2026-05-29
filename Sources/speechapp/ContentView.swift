@@ -582,6 +582,7 @@ struct LaunchButtonStyle: ButtonStyle {
 
 struct SpeechNarrationView: View {
     @EnvironmentObject var backend: BackendProcessManager
+    @Environment(\.dismiss) private var dismiss
     var onPlaceRecording: ((ProjectNarration) -> Void)?
 
     @State private var textInput = "Hello! I am now streaming audio dynamically chunk by chunk."
@@ -596,8 +597,11 @@ struct SpeechNarrationView: View {
     @State private var streamPlayer: PCMStreamPlayer?
     @State private var savedRecordings: [SavedRecording] = []
     @State private var filePlayer: AVAudioPlayer?
+    @State private var previewPlayer: AVAudioPlayer?
     @State private var playbackObserver: AudioPlaybackObserver?
     @State private var playingRecordingID: URL?
+    @State private var previewingVoice: String?
+    @State private var isShowingVoicePicker = false
 
     private let availableVoices = ["af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky", "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael", "am_onyx", "am_puck", "am_santa", "bf_alice", "bf_emma", "bf_isabella", "bf_lily", "bm_daniel", "bm_fable", "bm_george", "bm_lewis", "ef_dora", "em_alex", "em_santa", "ff_siwis", "hf_alpha", "hf_beta", "hm_omega", "hm_psi", "if_sara", "im_nicola", "jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo", "pf_dora", "pm_alex", "pm_santa", "zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi", "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang"]
 
@@ -613,12 +617,13 @@ struct SpeechNarrationView: View {
             backend.isServerReady ? AnyView(speechWorkspaceView) : AnyView(startupView)
         }
         .animation(.easeInOut(duration: 0.2), value: backend.isServerReady)
-        .frame(minWidth: 780, idealWidth: 880, minHeight: 520, idealHeight: 600)
+        .frame(minWidth: 560, idealWidth: 640, minHeight: 520, idealHeight: 600)
         .onAppear(perform: loadSavedRecordings)
         .onDisappear {
             cancelStreaming()
             fileTask?.cancel()
             filePlayer?.stop()
+            previewPlayer?.stop()
         }
     }
 
@@ -636,16 +641,8 @@ struct SpeechNarrationView: View {
     }
 
     private var speechWorkspaceView: some View {
-        HStack(spacing: 0) {
-            composerView
-                .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
-
-            Divider()
-
-            libraryView
-                .frame(width: 320)
-                .frame(maxHeight: .infinity)
-        }
+        composerView
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var composerView: some View {
@@ -674,69 +671,141 @@ struct SpeechNarrationView: View {
     }
 
     private var headerView: some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Kokoro")
-                    .font(.system(size: 30, weight: .semibold, design: .rounded))
-                Text("Offline speech generation")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            Picker("Voice", selection: $selectedVoice) {
-                ForEach(availableVoices, id: \.self) { voice in
-                    Text(voice).tag(voice)
-                }
-            }
-            .pickerStyle(.menu)
-            .frame(width: 180)
-            .disabled(isBusy)
-        }
+        Text("Add Narration")
+            .font(.system(size: 30, weight: .semibold, design: .rounded))
     }
 
     private var controlsView: some View {
-        HStack(spacing: 10) {
-            if isStreaming {
-                Button(role: .destructive, action: cancelStreaming) {
-                    Label("Cancel Stream", systemImage: "stop.fill")
-                }
-                .buttonStyle(.borderedProminent)
-            } else {
-                Button(action: startStreaming) {
-                    Label("Stream Sound", systemImage: "waveform")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(isGeneratingFile || textInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
+        VStack(spacing: 14) {
+            voiceSelector
 
-            Button(action: startFileGeneration) {
-                if isGeneratingFile {
-                    Label("Generating", systemImage: "hourglass")
-                } else {
-                    Label("Generate File", systemImage: "square.and.arrow.down")
-                }
-            }
-            .disabled(isBusy || textInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-            if onPlaceRecording != nil {
-                Button(action: startTrackPlacementGeneration) {
-                    if isGeneratingTrackPlacement {
-                        Label("Placing", systemImage: "hourglass")
+            HStack(spacing: 10) {
+                Button(action: startGenerateAction) {
+                    if isGeneratingFile || isGeneratingTrackPlacement {
+                        Label("Generating", systemImage: "hourglass")
                     } else {
-                        Label("Generate and Place Into Track", systemImage: "text.line.first.and.arrowtriangle.forward")
+                        Label("Generate", systemImage: "waveform")
                     }
                 }
+                .buttonStyle(.borderedProminent)
                 .disabled(isBusy || textInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                Button("Cancel", action: cancelAndDismiss)
+                    .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Text("\(textInput.count) chars")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-
-            Spacer()
-
-            Text("\(textInput.count) chars")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
+    }
+
+    private var voiceSelector: some View {
+        Button(action: { isShowingVoicePicker.toggle() }) {
+            HStack(spacing: 10) {
+                Text(voiceFlag(for: selectedVoice))
+                    .font(.title3)
+                Text(voiceDisplayName(for: selectedVoice))
+                    .font(.callout.weight(.medium))
+                Spacer()
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 38)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.bordered)
+        .disabled(isBusy)
+        .popover(isPresented: $isShowingVoicePicker, arrowEdge: .bottom) {
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(availableVoices, id: \.self) { voice in
+                        voicePickerRow(voice)
+                    }
+                }
+                .padding(8)
+            }
+            .frame(width: 360, height: 360)
+        }
+    }
+
+    private func voicePickerRow(_ voice: String) -> some View {
+        HStack(spacing: 10) {
+            Button(action: {
+                selectedVoice = voice
+                isShowingVoicePicker = false
+            }) {
+                HStack(spacing: 10) {
+                    Text(voiceFlag(for: voice))
+                        .font(.title3)
+                    Text(voiceDisplayName(for: voice))
+                        .font(.callout)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button(action: { playVoicePreview(for: voice) }) {
+                Image(systemName: previewingVoice == voice ? "stop.fill" : "play.fill")
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.borderless)
+            .help("Play preview")
+
+            if selectedVoice == voice {
+                Image(systemName: "checkmark")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tint)
+            } else {
+                Color.clear.frame(width: 12, height: 12)
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, minHeight: 36)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            selectedVoice = voice
+            isShowingVoicePicker = false
+        }
+    }
+
+    private func voiceDisplayName(for voice: String) -> String {
+        let name = voice.split(separator: "_", maxSplits: 1).last.map(String.init) ?? voice
+        return name.prefix(1).uppercased() + name.dropFirst()
+    }
+
+    private func voiceFlag(for voice: String) -> String {
+        switch String(voice.prefix(2)) {
+        case "af", "am": "🇺🇸"
+        case "bf", "bm": "🇬🇧"
+        case "ef", "em": "🇪🇸"
+        case "ff": "🇫🇷"
+        case "hf", "hm": "🇮🇳"
+        case "if", "im": "🇮🇹"
+        case "jf", "jm": "🇯🇵"
+        case "pf", "pm": "🇧🇷"
+        case "zf", "zm": "🇨🇳"
+        default: "🏳️"
+        }
+    }
+
+    private func startGenerateAction() {
+        if onPlaceRecording != nil {
+            startTrackPlacementGeneration()
+        } else {
+            startFileGeneration()
+        }
+    }
+
+    private func cancelAndDismiss() {
+        cancelStreaming()
+        fileTask?.cancel()
+        previewPlayer?.stop()
+        dismiss()
     }
 
     private var statusView: some View {
@@ -838,7 +907,6 @@ struct SpeechNarrationView: View {
             .help("Delete")
         }
     }
-
     private func startStreaming() {
         streamTask?.cancel()
         streamTask = Task {
@@ -1209,6 +1277,53 @@ struct SpeechNarrationView: View {
             statusKind = .ready
         } catch {
             statusMessage = "Could not play file: \(error.localizedDescription)"
+            statusKind = .error
+        }
+    }
+
+    private func playVoicePreview(for voice: String) {
+        if previewingVoice == voice, previewPlayer?.isPlaying == true {
+            previewPlayer?.stop()
+            previewPlayer = nil
+            previewingVoice = nil
+            return
+        }
+
+        let previewURL = Bundle.module.url(
+            forResource: voice,
+            withExtension: "m4a",
+            subdirectory: "speech_previews"
+        ) ?? Bundle.module.url(
+            forResource: "generic-fallback",
+            withExtension: "m4a",
+            subdirectory: "speech_previews"
+        )
+
+        guard let previewURL else {
+            statusMessage = "Could not find voice preview audio"
+            statusKind = .error
+            return
+        }
+
+        do {
+            previewPlayer?.stop()
+            let player = try AVAudioPlayer(contentsOf: previewURL)
+            let observer = AudioPlaybackObserver()
+            observer.onFinish = {
+                previewingVoice = nil
+                previewPlayer = nil
+                playbackObserver = nil
+            }
+            player.delegate = observer
+            player.prepareToPlay()
+            player.play()
+            previewPlayer = player
+            playbackObserver = observer
+            previewingVoice = voice
+            statusMessage = "Playing \(voiceDisplayName(for: voice)) preview"
+            statusKind = .ready
+        } catch {
+            statusMessage = "Could not play preview: \(error.localizedDescription)"
             statusKind = .error
         }
     }

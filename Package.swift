@@ -25,7 +25,8 @@ let package = Package(
             ],
             resources: [
                 // Embed the compiled python executable safely inside the target resources
-                .copy("Resources/tts_backend")
+                .copy("Resources/tts_backend"),
+                .copy("Resources/speech_previews")
             ],
             // FIX: This injects the "Allow Arbitrary Loads" dictionary directly into the binary's info segment
             linkerSettings: [
